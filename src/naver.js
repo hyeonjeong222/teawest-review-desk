@@ -6,6 +6,7 @@ import { AppError, assertSameReview, SerialQueue } from './core.js';
 import { readRenderedRows, readReviewDetail } from './naver-dom.js';
 import { REVIEW_URL, isNaverPage, loginWithCredentials } from './naver-login.js';
 import { browserCandidates } from './browser-path.js';
+import { withActiveReviewPage } from './browser-activity.js';
 
 const periods = { '1m': '1개월', '3m': '3개월', '6m': '6개월', '1y': '1년' };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -125,7 +126,7 @@ export class NaverConnector {
   }
   async search(frame, id) {
     const before = await frame.evaluate(() => document.querySelector('.ag-center-cols-container')?.innerText || '');
-    await frame.getByRole('button', { name: '검색', exact: true }).click();
+    await clickDialogButton(frame, '검색');
     // Wait for the grid to settle; re-check the expected ID before any publishing action.
     await pause(900);
     await frame.waitForFunction(() => /리뷰목록/.test(document.body.innerText), null, { timeout: 15000 });
@@ -135,12 +136,16 @@ export class NaverConnector {
   }
   async reset(frame, period) {
     await this.closeDetails(frame);
-    await frame.getByRole('button', { name: '초기화', exact: true }).click();
-    await frame.getByRole('button', { name: periods[period] || periods['3m'], exact: true }).click();
+    // Background tabs may stop animation frames used by Playwright's stability
+    // checks. These known search controls can dispatch their native click directly.
+    await clickDialogButton(frame, '초기화');
+    await clickDialogButton(frame, periods[period] || periods['3m']);
   }
   async sync(period = '3m') {
     if (!periods[period]) throw new AppError('지원하지 않는 조회 기간입니다.');
-    const { frame, store } = await this.workspace(); await this.reset(frame, period); await this.search(frame);
+    const { page, frame, store } = await this.workspace();
+    return withActiveReviewPage(page, async () => {
+    await this.reset(frame, period); await this.search(frame);
     const total = await frame.evaluate(() => { const match = document.body.innerText.match(/리뷰목록\s*\(총\s*([\d,]+)개\)/); return match ? Number(match[1].replaceAll(',', '')) : null; });
     if (!Number.isSafeInteger(total) || total < 0) throw new AppError('네이버 리뷰 건수를 확인하지 못했습니다. 기존 목록을 유지합니다.', 502, 'NAVER_LAYOUT');
     const collected = new Map(); let pages = 0;
@@ -167,6 +172,7 @@ export class NaverConnector {
     const dates = await frame.locator('input.date-picker-input').evaluateAll(els => els.map(e => e.value));
     if (collected.size !== total) throw new AppError(`네이버에는 ${total}건이 있지만 ${collected.size}건만 읽었습니다. 기존 목록을 유지합니다. 다시 동기화해 주세요.`, 502, 'INCOMPLETE_SYNC');
     return { reviews: Array.from(collected.values()), total, store, period, from: dates[0], to: dates[1] };
+    });
   }
   async locate(expected) {
     const { page, frame, store } = await this.workspace();

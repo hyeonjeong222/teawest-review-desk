@@ -53,6 +53,17 @@ test('Naver sync waits for delayed final rows in a virtual scrolling grid', asyn
   assert.deepEqual(result.reviews.map(r => r.id), ['1234567890', '1234567891']);
 });
 
+test('Naver read-only filter controls work outside frame viewport coordinates and never submit a reply', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage(); await page.setContent(fixture);
+  await page.addStyleTag({ content: 'button { transform: translateX(-10000px) }' });
+  await assert.rejects(page.getByRole('button', { name: '초기화', exact: true }).click({ timeout: 300 }));
+  const connector = new NaverConnector('unused-test-profile');
+  connector.workspace = async () => ({ page, frame: page.mainFrame(), store: '테스트 스토어' });
+  const result = await connector.sync('1m'); assert.equal(result.total, 1);
+  assert.equal(await page.evaluate(() => window.submits), 0);
+});
+
 test('Naver adapter: exact-review posting, saved-text read-back, and duplicate guard on an isolated seller UI fixture', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage();

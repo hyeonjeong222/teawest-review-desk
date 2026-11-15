@@ -1,12 +1,21 @@
 import { AppError, assertSameReview } from './core.js';
 import { deliveryPlatforms } from '../public/platforms.js';
 import { coupangDateRange } from './coupang.js';
+import { withActiveReviewPage } from './browser-activity.js';
 
 const origin = 'https://self.baemin.com';
 const periods = { '1m': '최근 30일', '3m': '최근 3개월', '6m': '최근 6개월' };
 const layout = () => new AppError('배민 리뷰 화면을 확인하지 못했습니다. 기존 리뷰와 초안은 유지됩니다.', 502, 'BAEMIN_LAYOUT');
 const login = () => new AppError('배민 연결 창에서 로그인과 추가 인증을 완료해 주세요.', 409, 'DELIVERY_LOGIN_REQUIRED');
 const safeId = value => (typeof value === 'string' && /^\d+$/.test(value)) || (Number.isSafeInteger(value) && value > 0);
+export async function clickBaeminFilter(control) {
+  if (await control.count() !== 1) throw layout();
+  // Filter/calendar controls only. No reply, setting or purchase submission uses this.
+  await control.evaluate(element => {
+    if (element.disabled || element.getAttribute('aria-disabled') === 'true' || !element.getClientRects().length || getComputedStyle(element).visibility === 'hidden') throw new Error('Filter unavailable');
+    element.click();
+  });
+}
 // Inclusive windows, each strictly shorter than six calendar months.
 export function baeminDateWindows(from, to) {
   const windows = [], end = Date.parse(`${to}T00:00:00Z`);
@@ -23,24 +32,24 @@ export function baeminDateWindows(from, to) {
   return windows;
 }
 export async function selectBaeminDates(page, range) {
-  await page.getByRole('radio',{name:'날짜 직접 선택',exact:true}).check();
+  await clickBaeminFilter(page.getByRole('radio',{name:'날짜 직접 선택',exact:true}));
   const sheet = page.getByRole('dialog').filter({has:page.getByRole('heading',{name:'기간',exact:true})});
-  await sheet.getByRole('button',{name:/^\d{4}\.\s*\d+\.\s*\d+\s*~/}).click();
+  await clickBaeminFilter(sheet.getByRole('button',{name:/^\d{4}\.\s*\d+\.\s*\d+\s*~/}));
   const calendar = page.getByRole('dialog').filter({has:page.getByRole('grid')});
   for (const date of [range.from, range.to]) {
     const [year,month,day] = date.split('-').map(Number), name = `${year}년 ${month}월`;
     for (let moves=0; moves<30; moves++) {
       const grid = calendar.getByRole('grid',{name,exact:true});
-      if (await grid.count()) { await grid.getByRole('button',{name:`${day}일`,exact:true}).click(); break; }
+      if (await grid.count()) { await clickBaeminFilter(grid.getByRole('button',{name:`${day}일`,exact:true})); break; }
       const caption = await calendar.getByRole('grid').first().locator('caption').innerText();
       const parts = caption?.match(/(\d+)년\s*(\d+)월/); if (!parts || moves===29) throw layout();
       const delta = year*12+month-(Number(parts[1])*12+Number(parts[2]));
-      await calendar.getByRole('button',{name:delta<0?'이전 달':'다음 달',exact:true}).click();
+      await clickBaeminFilter(calendar.getByRole('button',{name:delta<0?'이전 달':'다음 달',exact:true}));
     }
   }
-  await calendar.getByRole('button',{name:'적용',exact:true}).click();
+  await clickBaeminFilter(calendar.getByRole('button',{name:'적용',exact:true}));
   await calendar.waitFor({state:'hidden'});
-  await sheet.getByRole('button',{name:'적용',exact:true}).click();
+  await clickBaeminFilter(sheet.getByRole('button',{name:'적용',exact:true}));
 }
 export function normalizeBaeminReview(raw, platform, shop) {
   if (!safeId(raw.id) || String(raw.shopNumber) !== shop.id || !Number.isInteger(raw.rating) || raw.rating < 1 || raw.rating > 5 || typeof raw.contents !== 'string' || !Array.isArray(raw.comments) || !Array.isArray(raw.menus) || !Array.isArray(raw.images) || typeof raw.writableComment !== 'boolean') throw layout();
@@ -63,7 +72,9 @@ export class BaeminConnector {
   async getPage(create = false) {
     const context = (await this.host.connect()).contexts()[0];
     if (this.page && !this.page.isClosed()) return this.page;
-    let page = context.pages().find(p=>p.url().startsWith(origin)) || context.pages().find(p=>p.url().startsWith('https://biz-member.baemin.com/'));
+    // The landing tab can remain open after login without the shop selector.
+    const pages = context.pages();
+    let page = pages.find(p=>/^https:\/\/self\.baemin\.com\/shops\/\d+\/reviews/.test(p.url())) || pages.find(p=>p.url().startsWith(origin)) || pages.find(p=>p.url().startsWith('https://biz-member.baemin.com/'));
     if (!page && create) { page = await context.newPage(); await page.goto(origin, {waitUntil:'domcontentloaded'}); }
     if (!page) throw login();
     return page;
@@ -101,6 +112,7 @@ export class BaeminConnector {
   async collect(period = '3m', target = null, range = null) {
     if (!periods[period] && !range) throw new AppError('지원하지 않는 배민 조회 기간입니다.',400,'PERIOD_UNSUPPORTED');
     const {page,shop} = await this.workspace();
+    return withActiveReviewPage(page, async () => {
     if (await page.locator('[class*="ReviewContent-module"] textarea:visible').count()) throw new AppError('배민 연결 창에 열린 답글 입력창을 먼저 닫아 주세요.',409,'UNSAVED_DELIVERY_DRAFT');
     const groups = new Map(), pending = new Set(); let failure;
     const observe = response => {
@@ -121,14 +133,16 @@ export class BaeminConnector {
       await page.getByRole('button',{name:'필터 페이지시트 열기'}).waitFor({timeout:15000});
       // Close the promotional overlay if present; it is unrelated to reviews.
       const promo=page.getByRole('button',{name:'오늘 하루 보지 않기',exact:true});
-      if(await promo.waitFor({state:'visible',timeout:2000}).then(()=>true,()=>false))await promo.click();
+      if(await promo.waitFor({state:'visible',timeout:2000}).then(()=>true,()=>false))await clickBaeminFilter(promo);
       const reorderPromo=page.getByRole('dialog').filter({has:page.getByRole('heading',{name:'재주문이 약 1.4배 늘어나는 즉시할인을 제공해 보세요',exact:true})});
-      if(await reorderPromo.count())await reorderPromo.getByRole('button',{name:'닫기',exact:true}).click();
-      await page.getByRole('button',{name:'필터 페이지시트 열기'}).click();
+      if(await reorderPromo.count())await clickBaeminFilter(reorderPromo.getByRole('button',{name:'닫기',exact:true}));
+      await clickBaeminFilter(page.getByRole('button',{name:'필터 페이지시트 열기'}));
       if (range) await selectBaeminDates(page,range);
       else {
-        await page.locator(`input[name="review-date-filter"][value="${periods[period]}"]`).check();
-        await page.getByRole('button',{name:'적용',exact:true}).click();
+        const option = page.locator(`input[name="review-date-filter"][value="${periods[period]}"]`);
+        await clickBaeminFilter(option);
+        if (!await option.isChecked()) throw layout();
+        await clickBaeminFilter(page.getByRole('button',{name:'적용',exact:true}));
       }
       let lastSize=-1,stalled=0;
       for(let step=0;step<3000;step++) {
@@ -153,6 +167,7 @@ export class BaeminConnector {
       }
       throw layout();
     }finally{page.off('response',observe);await Promise.all([...pending]);}
+    });
   }
   async sync(period) {
     if(period!=='1y')return this.collect(period);

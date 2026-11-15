@@ -69,6 +69,17 @@ test('queued automatic work uses the latest manual period and never overlaps an 
   assert.deepEqual(controls.naver.calls, ['1y', '1y']);
 });
 
+test('a failed manual period change retries the selected shared period instead of the previous cached year', async t => {
+  const { store, controls, sources, auto } = await fixture(t);
+  store.data.syncs.naver.period = '1y'; store.data.reviewPeriod = '1m';
+  controls.naver.error = new AppError('Temporary read failure', 502, 'INCOMPLETE_SYNC');
+  await assert.rejects(sources.naver.service.sync('1m'));
+  assert.equal(store.data.syncs.naver.period, '1y');
+  controls.naver.error = null; await auto.tick();
+  assert.deepEqual(controls.naver.calls, ['1m', '1m']);
+  for (const platform of platforms) assert.equal(store.data.syncs[platform].period, '1m');
+});
+
 test('disabling cancels queued automatic reads, settings survive restart, and changed seller accounts are not overwritten', async t => {
   const { store, directory, sources, controls, auto } = await fixture(t), gate = deferred();
   const active = sources.naver.service.queue.run(() => gate.promise), pending = auto.tick();

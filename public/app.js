@@ -140,7 +140,7 @@ function renderPeriodControls() {
   const limit = period === '1y' && request ? ' 배민은 기간을 나누어 1년치를 조회합니다.' : '';
   $('#period-status').textContent = request
     ? `전체 스토어 ${periodLabels[period]} 조회 중 (${platforms.filter(p => !waitingForPeriod(p)).length}/${platforms.length}) · 현재 목록: ${applied}.${limit}`
-    : failedPeriod(platform) ? `조회 실패 · 기존 목록: ${applied}. 다시 새로고침해 주세요.${limit}`
+    : failedPeriod(platform) ? `조회 실패: ${state.syncErrors[platform].message} · 기존 목록: ${applied}.${limit}`
     : info?.period !== effectiveReviewPeriod(platform, period) ? `전체 스토어 ${periodLabels[period]} 선택 · 이 매장은 조회가 필요합니다. 기존 목록: ${applied}.${limit}`
     : applied;
 }

@@ -46,7 +46,7 @@ export async function collectReviews(store, connector, platform, period, { autom
   if (automatic && shouldRun && !shouldRun()) throw new AppError('자동 가져오기를 중지했습니다.', 409, 'AUTO_SYNC_CANCELLED');
   const previous = store.data.syncs?.[platform] || (platform === 'naver' ? store.data.sync : null);
   // Resolve inside the service queue so a newer manual period always wins.
-  if (automatic) period = previous?.period || '3m';
+  if (automatic) period = store.data.reviewPeriod || previous?.period || '3m';
   if (automatic && previous?.store) {
     const status = await connector.status();
     if (status.connected && status.store && status.store !== previous.store) throw new AppError('연결된 판매자 계정이 변경되었습니다. 스토어를 확인하고 직접 리뷰를 가져와 주세요.', 409, 'STORE_CHANGED');
