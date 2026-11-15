@@ -9,8 +9,8 @@ if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Bui
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const directory = path.join(root, 'dist', `ReviewDesk-Windows-x64-${stamp}`);
 await mkdir(directory, { recursive: true });
-// Deliberate allowlist: no local state, credentials, .env, browser profile, Git, or diagnostic scripts.
-for (const item of ['src', 'public', 'package.json', 'package-lock.json', 'README.md', '다른 PC 사용 안내.txt', '리뷰관리 실행.cmd', 'start-review.ps1', 'scripts/launch.mjs']) {
+// Deliberate allowlist: no local state, credentials, .env, browser profile, Git, or ad hoc inspection scripts.
+for (const item of ['src', 'public', 'package.json', 'package-lock.json', 'README.md', '다른 PC 사용 안내.txt', '리뷰관리 실행.cmd', '연결 상태 진단.cmd', 'start-review.ps1', 'scripts/launch.mjs', 'scripts/diagnose-connection.mjs', 'scripts/migrate-legacy.mjs']) {
   await cp(path.join(root, item), path.join(directory, item), { recursive: true, dereference: false, errorOnExist: true, force: false });
 }
 const lock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
@@ -36,6 +36,7 @@ if(!license.includes('Node.js') || !license.includes('Permission is hereby grant
 await writeFile(path.join(directory, 'runtime', 'NODE-LICENSE.txt'), license);
 // Also provide an ASCII filename for older ZIP extractors.
 await cp(path.join(directory, '리뷰관리 실행.cmd'), path.join(directory, 'Start Review Desk.cmd'));
+await cp(path.join(directory, '연결 상태 진단.cmd'), path.join(directory, 'Check Connection.cmd'));
 const hashes = [];
 async function audit(folder) {
   for (const entry of await readdir(folder, {withFileTypes:true})) {

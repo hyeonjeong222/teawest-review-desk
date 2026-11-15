@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile, access } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { readFile, access, readdir } from 'node:fs/promises';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
@@ -20,5 +21,12 @@ try{
   for(const value of Object.values(status.platforms)){assert.equal(value.connected,false);assert.equal(value.autoLogin.configured,false);}
   const crossOrigin=await fetch(base+'/api/auto-sync/settings',{method:'POST',headers:{origin:'https://example.invalid','content-type':'application/json','x-review-token':session.csrf},body:'{"enabled":false}'});assert.equal(crossOrigin.status,403);
   const emptyExport=await fetch(base+'/api/credentials/export',{method:'POST',headers:{origin:base,'content-type':'application/json','x-review-token':session.csrf},body:JSON.stringify({password:'synthetic-smoke-password'})});assert.equal(emptyExport.status,409);assert.equal((await emptyExport.json()).code,'TRANSFER_EMPTY');
-  console.log(JSON.stringify({packagedRuntime:true,hashesVerified:manifest.length,cleanReviews:true,credentialsAbsent:true,gptKeyAbsent:true,localServerStarted:true,csrfVerified:true}));
+  await access(path.join(folder,'Check Connection.cmd'));
+  const diagnostic = await promisify(execFile)(path.join(folder,'runtime','node.exe'),['scripts/diagnose-connection.mjs'],{cwd:folder,windowsHide:true,timeout:30000,env:{...process.env,PORT:String(port),NAVER_CDP_URL:'http://127.0.0.1:19339',NODE_OPTIONS:''}});
+  assert.match(diagnostic.stdout,/review-desk-connection-diagnostic/);
+  const reports=(await readdir(path.join(folder,'.local'))).filter(name=>/^connection-diagnostic-.*\.txt$/.test(name));
+  assert.equal(reports.length,1);
+  const report=await readFile(path.join(folder,'.local',reports[0]),'utf8');
+  assert.match(report,/"recognized": true/);assert.equal(report.includes(session.csrf),false);
+  console.log(JSON.stringify({packagedRuntime:true,hashesVerified:manifest.length,cleanReviews:true,credentialsAbsent:true,gptKeyAbsent:true,localServerStarted:true,csrfVerified:true,diagnosticReportVerified:true}));
 }finally{child.kill();}

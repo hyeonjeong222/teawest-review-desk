@@ -1,12 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { cleanupTestDirectory } from './cleanup.js';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../src/server.js';
 import { fingerprint } from '../src/core.js';
+test('installer shutdown is CSRF protected, rejects new writes, and drains active work before closing', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'review-http-test-'));
+  const port = 14328, origin = `http://127.0.0.1:${port}`;
+  const app = await createApp({ directory, port, maintenanceInterval: 0, connector: { status: async () => ({ connected: false }) } });
+  t.after(async () => { app.server.closeAllConnections(); if (app.server.listening) await new Promise(r => app.server.close(r)); await cleanupTestDirectory(directory); });
+  app.server.listen(port, '127.0.0.1'); await once(app.server, 'listening');
+  const post = (route, data, token = app.csrf) => fetch(origin + route, { method: 'POST', headers: { 'content-type': 'application/json', Origin: origin, 'X-Review-Token': token }, body: JSON.stringify(data) });
+  assert.equal((await post('/api/app/shutdown', { confirmed: true }, 'bad')).status, 403);
+  assert.equal((await post('/api/app/shutdown', { confirmed: false })).status, 400);
+  let finish; const pending = new Promise(resolve => { finish = resolve; });
+  const writing = app.service.queue.run(async () => { await pending; await app.store.update(state => { state.drafts.final = { text: 'saved before shutdown' }; }); });
+  const shutdown = post('/api/app/shutdown', { confirmed: true });
+  for (let i = 0; i < 30; i++) { if ((await fetch(origin + '/api/app/info').then(r => r.json())).shuttingDown) break; await new Promise(r => setTimeout(r, 10)); }
+  assert.equal((await post('/api/auto-sync/settings', { enabled: false, intervalMinutes: 10 })).status, 503);
+  const closed = once(app.server, 'close'); finish(); await writing;
+  assert.equal((await shutdown).status, 200); await closed;
+  const stored = JSON.parse(await readFile(path.join(directory, 'state.json'), 'utf8')); assert.equal(stored.drafts.final.text, 'saved before shutdown');
+});
 test('HTTP boundaries require same-origin CSRF, protect keys, and publish only the edited preview', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'review-http-test-')); let published = [];
   const review = { id: '1234567890', productId: '555', product: '테스트', content: '맛있어요', rating: 5, store: '테스트', hasReply: false };

@@ -20,9 +20,12 @@ import { DeliveryAccountConnector } from './delivery-login.js';
 import { deliveryPlatforms, platforms, platformLabels, effectiveReviewPeriod } from '../public/platforms.js';
 import { reviewPlatform, replyLimit } from './core.js';
 import { CredentialTransfer, recoverCredentialTransfer } from './credential-transfer.js';
+import { dataDirectory } from './data-directory.js';
+import { AppUpdater } from './app-update.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export async function createApp({ directory = path.join(root, '.local'), connector, coupangConnector, ablyConnector, deliveryConnectors = {}, deliveryAccountConnectors = {}, deliveryVaults = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000 } = {}) {
+const appVersion = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
+export async function createApp({ directory = dataDirectory(), connector, coupangConnector, ablyConnector, deliveryConnectors = {}, deliveryAccountConnectors = {}, deliveryVaults = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000, updater, onShutdown } = {}) {
   await recoverCredentialTransfer(directory);
   const store = new Store(directory); await store.init();
   connector ||= new NaverConnector(directory);
@@ -62,6 +65,8 @@ export async function createApp({ directory = path.join(root, '.local'), connect
   const autoSync = new AutoReviewSync(store, sources);
   keyVault ||= new APIKeyVault(directory, ai); await keyVault.init();
   const settingsQueue = new SerialQueue();
+  updater ||= new AppUpdater(directory, appVersion);
+  let shuttingDown = false, activeMutations = 0;
   const credentialTransfer = new CredentialTransfer({directory,auths:{naver:autoLogin,coupang:coupangAutoLogin,ably:ablyAutoLogin,...deliveryAuth},keyVault,ai,settingsQueue});
   let transferring=false;
   const aiState = () => ({ aiConfigured: ai.configured, aiKey: keyVault.publicState() });
@@ -75,12 +80,16 @@ export async function createApp({ directory = path.join(root, '.local'), connect
     try { return JSON.parse(text || '{}'); } catch { throw new AppError('요청 형식이 잘못되었습니다.'); }
   }
   const server = http.createServer(async (req, res) => {
+    const counted = req.method === 'POST' && req.url?.split('?')[0] !== '/api/app/shutdown';
+    if (counted) activeMutations++;
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://*.pstatic.net https://*.coupangcdn.com https://d3ha2047wt6x28.cloudfront.net https://bmreview.cdn.baemin.com data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       if (!origins.has(`http://${req.headers.host}`)) throw new AppError('허용되지 않은 호스트입니다.', 403);
       const url = new URL(req.url, `http://${req.headers.host}`); const route = url.pathname;
-      if (req.method === 'GET' && route === '/api/session') return json(res, 200, { csrf, settings: store.data.settings, autoSync: autoSync.publicState(), ...aiState() });
+      if (req.method === 'GET' && route === '/api/session') return json(res, 200, { csrf, settings: store.data.settings, autoSync: autoSync.publicState(), app: { version: appVersion, installed: process.env.REVIEW_DESK_INSTALLED === '1' }, ...aiState() });
+      if (req.method === 'GET' && route === '/api/app/info') return json(res, 200, { app: 'teawest-review-desk', version: appVersion, root, dataDirectory: directory, pid: process.pid, installed: process.env.REVIEW_DESK_INSTALLED === '1', shuttingDown });
+      if (req.method === 'GET' && route === '/api/app/update') return json(res, 200, updater.publicState());
       if (req.method === 'GET' && route === '/api/status') {
         const statuses = Object.fromEntries(await Promise.all(Object.entries(sources).map(async ([id, source]) => [id, { ...await source.connector.status(), ...(source.autoLogin ? { autoLogin: source.autoLogin.publicState() } : {}) }])));
         const naver = statuses.naver;
@@ -90,6 +99,29 @@ export async function createApp({ directory = path.join(root, '.local'), connect
       if (req.method === 'POST') {
         if (!origins.has(req.headers.origin) || req.headers['x-review-token'] !== csrf) throw new AppError('이 페이지에서 다시 시도해 주세요.', 403, 'CSRF');
         const data = await body(req);
+        if (shuttingDown) throw new AppError('업데이트를 위해 앱을 종료하고 있습니다. 잠시 후 다시 열어 주세요.', 503, 'APP_STOPPING');
+        if (route === '/api/app/shutdown') {
+          if (data.confirmed !== true) throw new AppError('앱 재시작을 확인해 주세요.', 400);
+          shuttingDown = true; clearInterval(maintenance); autoSync.stop();
+          try {
+            const queues = [...new Set([store.queue, settingsQueue, ...Object.values(sources).map(s => s.service.queue)])];
+            await new Promise((resolve, reject) => {
+              const deadline = setTimeout(() => reject(new AppError('진행 중인 리뷰 작업이 있습니다. 작업을 마친 뒤 다시 설치해 주세요.', 409, 'APP_BUSY')), 60000);
+              (async () => { while (activeMutations) await new Promise(r => setTimeout(r, 100)); await Promise.all(queues.map(q => q.tail)); })().then(resolve, reject).finally(() => clearTimeout(deadline));
+            });
+          } catch (error) {
+            shuttingDown = false; autoSync.stopped = false;
+            if (maintenanceInterval) { maintenance = setInterval(maintain, maintenanceInterval); maintenance.unref(); }
+            throw error;
+          }
+          res.once('finish', () => {
+            server.close(() => onShutdown?.()); server.closeIdleConnections();
+            setTimeout(() => { server.closeAllConnections(); onShutdown?.(); }, 1000).unref();
+          });
+          return json(res, 200, { stopped: true });
+        }
+        if (route === '/api/app/update/check') return json(res, 200, await updater.check());
+        if (route === '/api/app/update/install') return json(res, 200, await updater.install(data.confirmed));
         if(route==='/api/credentials/export' || route==='/api/credentials/import') {
           if(transferring)throw new AppError('로그인 정보 이전을 처리 중입니다. 잠시 기다려 주세요.',409,'TRANSFER_BUSY');
           transferring=true;
@@ -191,16 +223,16 @@ export async function createApp({ directory = path.join(root, '.local'), connect
       if (error.code === 'DELIVERY_LOGIN_REQUIRED') for (const auth of Object.values(deliveryAuth)) void auth.schedule();
       if (error instanceof AppError) json(res, error.status, { error: error.message, code: error.code });
       else { console.error(`[${new Date().toISOString()}] ${error.name}: request failed`); json(res, 500, { error: '작업을 완료하지 못했습니다. 스토어 연결 상태를 확인하고 다시 시도해 주세요.', code: 'INTERNAL_ERROR' }); }
-    }
+    } finally { if (counted) activeMutations--; }
   });
   server.requestTimeout = 120_000;
   let maintenance;
-  const maintain = () => { for (const auth of [autoLogin, coupangAutoLogin, ablyAutoLogin, ...Object.values(deliveryAuth)]) void auth.schedule(); void autoSync.tick(); };
+  const maintain = () => { if (shuttingDown) return; for (const auth of [autoLogin, coupangAutoLogin, ablyAutoLogin, ...Object.values(deliveryAuth)]) void auth.schedule(); void autoSync.tick(); };
   server.on('listening', () => { if (maintenanceInterval) { maintain(); maintenance = setInterval(maintain, maintenanceInterval); maintenance.unref(); } });
   server.on('close', () => { clearInterval(maintenance); autoSync.stop(); });
   return { server, store, sources, service, coupangService, ablyService, csrf, autoLogin, coupangAutoLogin, ablyAutoLogin, deliveryAuth, deliveryAccounts, autoSync };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 4317); const { server } = await createApp({ port });
+  const port = Number(process.env.PORT || 4317); const { server } = await createApp({ port, onShutdown: () => process.exit(0) });
   server.listen(port, '127.0.0.1', () => console.log(`Review Desk ready: http://127.0.0.1:${port}`));
 }

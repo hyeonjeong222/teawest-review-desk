@@ -22,6 +22,32 @@ before(async () => {
 });
 after(async () => { uiServer.closeAllConnections(); await new Promise(resolve => uiServer.close(resolve)); });
 
+test('update UI saves pending drafts before installer launch and remains usable on mobile', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage(), calls = [], errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const version = { currentVersion: '1.0.0', latestVersion: '1.1.0', available: true, phase: 'available', message: '새 버전 1.1.0을 설치할 수 있습니다.' };
+  await page.route('**/api/**', async route => {
+    const request = route.request(), url = new URL(request.url()); let result = {};
+    if (url.pathname === '/api/session') result = { csrf: 'test', settings: { brand: '테스트' }, aiConfigured: false, app: { version: '1.0.0' } };
+    else if (url.pathname === '/api/reviews') result = { reviews: [{ id: '12345', platform: 'naver', product: '상품', author: '고객', content: '후기', date: '2026.11.15', rating: 5, hasReply: false }], drafts: {} };
+    else if (url.pathname === '/api/status') result = { connected: true, aiConfigured: false };
+    else if (url.pathname === '/api/app/update') result = { ...version, available: false, phase: 'idle' };
+    else if (url.pathname === '/api/app/update/check') result = version;
+    else if (url.pathname.endsWith('/draft')) { calls.push({ route: 'draft', text: request.postDataJSON().text }); }
+    else if (url.pathname === '/api/app/update/install') { assert.equal(request.postDataJSON().confirmed, true); assert.equal(calls.at(-1).text, '업데이트 전에 저장할 답글'); calls.push({ route: 'install' }); result = { ...version, phase: 'installing', message: '설치 창에서 업데이트를 완료해 주세요.' }; }
+    else assert.fail('Unexpected endpoint: ' + url.pathname);
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl); await page.locator('#reply-editor').fill('업데이트 전에 저장할 답글');
+  await page.locator('#app-update-open').click(); assert.equal(await page.locator('#app-update-install').isDisabled(), true);
+  await page.locator('#app-update-check').click(); await page.waitForFunction(() => !document.querySelector('#app-update-install').disabled);
+  await page.locator('#app-update-install').click(); await page.getByText('설치 창에서 업데이트를 완료해 주세요.', { exact: true }).waitFor();
+  assert.equal(calls.at(-1).route, 'install'); assert.equal(await page.locator('#app-update-install').isDisabled(), true);
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.locator('[data-close="app-update-dialog"]').click(); assert.deepEqual(errors, []);
+});
+
 test('credential transfer UI downloads only the encrypted file, requires confirmation, clears secrets, and handles a wrong password', async t => {
   const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
   const page=await browser.newPage({acceptDownloads:true,viewport:{width:1280,height:1000}}),requests=[],errors=[];
@@ -49,7 +75,7 @@ test('credential transfer UI downloads only the encrypted file, requires confirm
   await page.locator('#transfer-import-password').fill('test-password');await page.locator('#transfer-import-button').click();await page.waitForFunction(()=>document.querySelector('#transfer-message').textContent.includes('복원이 완료'));
   assert.equal(requests.at(-1).data.confirmed,true);assert.deepEqual(requests.at(-1).data.backup,backup);assert.equal(await page.locator('#transfer-file').inputValue(),'');
   await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-  await page.locator('#transfer-export-password').fill('clear-on-close');await page.locator('[data-close="transfer-dialog"]').click();assert.equal(await page.locator('#transfer-export-password').inputValue(),'');assert.deepEqual(errors,[]);
+  await page.locator('#transfer-export-password').fill('clear-on-close');await page.locator('[data-close="transfer-dialog"]').click();await page.waitForFunction(()=>document.querySelector('#transfer-export-password').value==='');assert.deepEqual(errors,[]);
 });
 
 test('one shared period refreshes every top store count, survives switching tabs, and never labels stale results as current', async t => {

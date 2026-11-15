@@ -619,6 +619,42 @@ document.addEventListener('click', event => {
   const review = event.target.closest('[data-review]'); if (review) { state.selected = review.dataset.review; renderList(); renderDetail(); if (innerWidth < 901) $('#detail-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   const close = event.target.closest('[data-close]'); if (close && !state.publishing) $(`#${close.dataset.close}`).close();
 });
+let updateBusy = false, updatePolling, updateState = {};
+function renderUpdate(info = updateState) {
+  updateState = info;
+  $('#app-current-version').textContent = info.currentVersion || state.app?.version || '확인 중';
+  $('#app-update-status').textContent = info.message || '업데이트를 확인해 주세요.';
+  $('#app-update-progress').hidden = info.phase !== 'downloading';
+  $('#app-update-progress').value = info.progress || 0;
+  $('#app-update-check').disabled = updateBusy;
+  $('#app-update-install').disabled = updateBusy || !info.available || info.phase === 'installing';
+  $('[data-close="app-update-dialog"]').disabled = updateBusy;
+}
+$('#app-update-open').addEventListener('click', async () => {
+  if (state.publishing) return;
+  $('#app-update-dialog').showModal(); renderUpdate();
+  try { renderUpdate(await api('/api/app/update')); } catch (error) { $('#app-update-status').textContent = error.message; }
+});
+$('#app-update-check').addEventListener('click', async () => {
+  if (updateBusy) return;
+  updateBusy = true; renderUpdate({ ...updateState, message: '새 버전을 확인하고 있습니다.' });
+  try { updateState = await api('/api/app/update/check', {}); }
+  catch (error) { updateState = { ...updateState, message: error.message, available: false }; }
+  finally { updateBusy = false; renderUpdate(); }
+});
+$('#app-update-install').addEventListener('click', async () => {
+  if (updateBusy) return;
+  if (state.publishing || state.syncing || state.generating.size) { $('#app-update-status').textContent = '리뷰 가져오기·답글 작업이 끝난 뒤 설치해 주세요.'; return; }
+  updateBusy = true; renderUpdate({ ...updateState, message: '작성한 초안을 저장하고 있습니다.' });
+  try {
+    await Promise.all([...state.saveTimers.keys()].map(id => saveDraft(id)));
+    await Promise.all([...state.saving.values()]);
+    updatePolling = setInterval(() => { api('/api/app/update').then(info => { if (updateBusy) renderUpdate(info); }).catch(() => {}); }, 1000);
+    updateState = await api('/api/app/update/install', { confirmed: true });
+  } catch (error) { updateState = { ...updateState, message: error.message }; }
+  finally { clearInterval(updatePolling); updateBusy = false; renderUpdate(); }
+});
+$('#app-update-dialog').addEventListener('cancel', event => { if (updateBusy) event.preventDefault(); });
 $('#publish-dialog').addEventListener('cancel', event => { if (state.publishing) event.preventDefault(); });
 $('#publish-dialog').addEventListener('close', () => { if (!state.publishing) state.intent = null; });
 $('#search').addEventListener('input', event => { state.query = event.target.value; renderList(); });
