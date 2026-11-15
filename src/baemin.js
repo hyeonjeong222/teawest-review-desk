@@ -34,22 +34,59 @@ export function baeminDateWindows(from, to) {
 export async function selectBaeminDates(page, range) {
   await clickBaeminFilter(page.getByRole('radio',{name:'날짜 직접 선택',exact:true}));
   const sheet = page.getByRole('dialog').filter({has:page.getByRole('heading',{name:'기간',exact:true})});
-  await clickBaeminFilter(sheet.getByRole('button',{name:/^\d{4}\.\s*\d+\.\s*\d+\s*~/}));
+  const selected = sheet.getByRole('button',{name:/^\d{4}\.\s*\d+\.\s*\d+\s*~/});
+  for (let attempt=0; attempt<2; attempt++) {
+  await selected.click({timeout:5000});
   const calendar = page.getByRole('dialog').filter({has:page.getByRole('grid')});
+  // Clicking an already selected endpoint toggles it off in Baemin's range
+  // calendar. Start from an empty selection for every window, including retries.
+  await calendar.getByRole('button',{name:'초기화',exact:true}).click({timeout:5000});
   for (const date of [range.from, range.to]) {
     const [year,month,day] = date.split('-').map(Number), name = `${year}년 ${month}월`;
     for (let moves=0; moves<30; moves++) {
       const grid = calendar.getByRole('grid',{name,exact:true});
-      if (await grid.count()) { await clickBaeminFilter(grid.getByRole('button',{name:`${day}일`,exact:true})); break; }
+      if (await grid.count()) { await grid.getByRole('button',{name:`${day}일`,exact:true}).click({timeout:5000}); break; }
       const caption = await calendar.getByRole('grid').first().locator('caption').innerText();
       const parts = caption?.match(/(\d+)년\s*(\d+)월/); if (!parts || moves===29) throw layout();
       const delta = year*12+month-(Number(parts[1])*12+Number(parts[2]));
-      await clickBaeminFilter(calendar.getByRole('button',{name:delta<0?'이전 달':'다음 달',exact:true}));
+      await calendar.getByRole('button',{name:delta<0?'이전 달':'다음 달',exact:true}).click({timeout:5000});
+      // React must commit this month before the next navigation or day click.
+      const moved = await waitForBaeminValue(() => calendar.getByRole('grid').first().locator('caption').innerText(), text => text !== caption);
+      if (!moved) throw layout();
     }
   }
-  await clickBaeminFilter(calendar.getByRole('button',{name:'적용',exact:true}));
+  await calendar.getByRole('button',{name:'적용',exact:true}).click({timeout:5000});
   await calendar.waitFor({state:'hidden'});
-  await clickBaeminFilter(sheet.getByRole('button',{name:'적용',exact:true}));
+  if (await waitForBaeminValue(() => selected.innerText(), text => baeminDates(text).join('/') === `${range.from}/${range.to}`, 1500)) {
+    await sheet.getByRole('button',{name:'적용',exact:true}).click({timeout:5000});
+    await sheet.waitFor({state:'hidden',timeout:5000});
+    return;
+  }
+  }
+  throw new AppError('배민에 조회 날짜가 정확히 적용되지 않았습니다. 잠시 후 다시 가져와 주세요.',502,'BAEMIN_DATE_RANGE');
+}
+export function baeminDates(text) {
+  const [from,to]=text.split('~'), first=from.match(/(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/);
+  if(!first || !to)return [];
+  // The period sheet abbreviates the end year when both dates share a year.
+  const full=to.match(/(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/), short=to.match(/(\d{1,2})\.\s*(\d{1,2})/);
+  const last=full || (short && [short[0],first[1],short[1],short[2]]);
+  return last ? [first,last].map(m=>`${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`) : [];
+}
+async function waitForBaeminValue(read, matches, timeout=5000) {
+  const deadline=Date.now()+timeout;
+  do { if(matches(await read()))return true; await new Promise(resolve=>setTimeout(resolve,50)); } while(Date.now()<deadline);
+  return false;
+}
+export class BaeminReadWatchdog {
+  constructor(now=Date.now) { this.now=now; this.started=now(); this.changed=this.started; this.signature=null; }
+  check(group) {
+    const signature=group ? `${group.rows.size}/${group.total}/${group.offsets.size}` : null;
+    if(signature!==this.signature){this.signature=signature;this.changed=this.now();}
+    if(this.now()-this.started>180000 || this.now()-this.changed>(group?20000:15000)) {
+      throw new AppError(group ? '배민 리뷰 수집이 지연되어 중지했습니다. 기존 목록은 유지됩니다. 잠시 후 다시 가져와 주세요.' : '배민이 선택한 기간의 리뷰를 응답하지 않았습니다. 기존 목록은 유지됩니다. 다시 가져와 주세요.',502,'INCOMPLETE_SYNC');
+    }
+  }
 }
 export function normalizeBaeminReview(raw, platform, shop) {
   if (!safeId(raw.id) || String(raw.shopNumber) !== shop.id || !Number.isInteger(raw.rating) || raw.rating < 1 || raw.rating > 5 || typeof raw.contents !== 'string' || !Array.isArray(raw.comments) || !Array.isArray(raw.menus) || !Array.isArray(raw.images) || typeof raw.writableComment !== 'boolean') throw layout();
@@ -144,13 +181,15 @@ export class BaeminConnector {
         if (!await option.isChecked()) throw layout();
         await clickBaeminFilter(page.getByRole('button',{name:'적용',exact:true}));
       }
-      let lastSize=-1,stalled=0;
+      const watchdog=new BaeminReadWatchdog();
       for(let step=0;step<3000;step++) {
         await page.waitForTimeout(200); await Promise.all([...pending]); if(failure) throw failure;
         await this.guard(page,shop);
         const filterText=await page.locator('button[aria-label="필터 페이지시트 열기"]').innerText();
-        const dates=[...filterText.matchAll(/(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/g)].map(m=>`${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`);
+        const dates=baeminDates(filterText);
         const group=(!range || dates.join('/')===`${range.from}/${range.to}`) && groups.get(dates.join('/'));
+        watchdog.check(group);
+        if(this.progress?.phase==='syncing' && group) this.progress={...this.progress,rows:group.rows.size,total:group.total};
         if(process.env.DELIVERY_DEBUG && step%20===0)console.log(JSON.stringify({step,dates,groups:[...groups].map(([key,g])=>({key,size:g.rows.size,total:g.total,next:g.next}))}));
         if(group) {
           const found=target && group.rows.get(target.id);
@@ -160,8 +199,6 @@ export class BaeminConnector {
             if(reviews.some(r=>{const date=r.date.slice(0,10).replaceAll('.','-');return date<group.from||date>group.to;}))throw layout();
             return {reviews,total:group.total,store:`${shop.id} · ${shop.name}`,storeName:shop.name,period,from:group.from,to:group.to};
           }
-          stalled=group.rows.size===lastSize?stalled+1:0;lastSize=group.rows.size;
-          if(stalled>35) throw new AppError('배민 리뷰를 모두 읽지 못했습니다. 기존 목록을 유지합니다. 다시 가져와 주세요.',502,'INCOMPLETE_SYNC');
         }
         await page.evaluate(()=>{window.scrollTo(0,document.documentElement.scrollHeight);for(const e of document.querySelectorAll('main, [class*="ReviewList"], [class*="Content"]'))if(e.scrollHeight>e.clientHeight && ['auto','scroll'].includes(getComputedStyle(e).overflowY))e.scrollTop=e.scrollHeight;});
       }
@@ -170,10 +207,13 @@ export class BaeminConnector {
     });
   }
   async sync(period) {
-    if(period!=='1y')return this.collect(period);
+    this.progress={phase:'syncing',period,startedAt:new Date().toISOString(),window:1,windows:period==='1y'?2:1,rows:0,total:null,completed:0};
+    try {
+    if(period!=='1y') { const result=await this.collect(period); this.progress={...this.progress,phase:'done',rows:result.total,total:result.total}; return result; }
     const range=coupangDateRange('1y'), windows=baeminDateWindows(range.from,range.to), rows=new Map();
     let store,storeName,total=0;
-    for(const window of windows) {
+    for(const [index,window] of windows.entries()) {
+      this.progress={...this.progress,window:index+1,windows:windows.length,...window,rows:0,total:null,completed:rows.size};
       const result=await this.collect(period,null,window);
       if(store && store!==result.store)throw new AppError('조회 중 배민 매장이 변경되었습니다.',409,'STORE_CHANGED');
       store=result.store;storeName=result.storeName;total+=result.total;
@@ -183,7 +223,12 @@ export class BaeminConnector {
       }
     }
     if(rows.size!==total)throw layout();
+    this.progress={...this.progress,phase:'done',rows:total,total,completed:total};
     return {reviews:[...rows.values()],total,store,storeName,period,...range};
+    } catch(error) {
+      this.progress={...this.progress,phase:'error',message:error instanceof AppError?error.message:'배민 조회가 중지됐습니다. 연결 창을 확인하고 다시 가져와 주세요.'};
+      throw error;
+    }
   }
   async locate(expected) {
     if(expected.platform!==this.platform)throw new AppError('선택한 매장이 다릅니다.',409,'STORE_CHANGED');

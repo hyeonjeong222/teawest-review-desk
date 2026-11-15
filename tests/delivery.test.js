@@ -22,6 +22,9 @@ test('delivery channels isolate shops, drafts, settings and confirmed publishing
  const base='http://127.0.0.1:14551',post=async(route,data,token=app.csrf)=>fetch(base+route,{method:'POST',headers:{Origin:base,'Content-Type':'application/json','X-Review-Token':token},body:JSON.stringify(data)});
  for(const p of Object.keys(deliveryPlatforms))assert.equal((await post('/api/sync',{platform:p,period:'1m'})).status,200);
  assert.equal(app.store.data.reviews.length,4);
+ deliveryConnectors['baemin-teawest'].progress={phase:'syncing',period:'1y',window:1,windows:2,rows:120,total:800};
+ const progress=await fetch(base+'/api/reviews').then(r=>r.json());
+ assert.deepEqual(progress.syncProgress['baemin-teawest'],deliveryConnectors['baemin-teawest'].progress);
  const a=originals['baemin-teawest'],b=originals['baemin-besti'],e=originals['coupangeats-besti'];
  await post(`/api/reviews/${a.id}/draft`,{text:'티웨스트의 초안입니다.'});await post(`/api/reviews/${b.id}/draft`,{text:'베스티의 초안입니다.'});
  await post('/api/sync',{platform:b.platform});assert.equal(app.store.data.drafts[a.id].text,'티웨스트의 초안입니다.');

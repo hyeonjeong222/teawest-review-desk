@@ -60,13 +60,16 @@ test('a disconnected or failing platform keeps its cache, others proceed, and re
   assert.equal(Date.parse(auto.publicState().platforms.ably.nextRunAt), failedAt + 1800000);
 });
 
-test('queued automatic work uses the latest manual period and never overlaps an active review operation', async t => {
+test('automatic work waits for a manual scan and does not repeat the full year after it completes', async t => {
   const { sources, controls, auto } = await fixture(t), gate = deferred();
   const active = sources.naver.service.queue.run(() => gate.promise);
   const manual = sources.naver.service.sync('1y'); const background = auto.tick();
   await new Promise(resolve => setImmediate(resolve)); assert.equal(controls.naver.calls.length, 0);
   gate.resolve(); await Promise.all([active, manual, background]);
-  assert.deepEqual(controls.naver.calls, ['1y', '1y']);
+  assert.deepEqual(controls.naver.calls, ['1y']);
+  await auto.tick();
+  assert.deepEqual(controls.naver.calls, ['1y']);
+  assert.equal(auto.publicState().platforms.naver.period,'1y');
 });
 
 test('a failed manual period change retries the selected shared period instead of the previous cached year', async t => {
@@ -95,7 +98,8 @@ test('disabling cancels queued automatic reads, settings survive restart, and ch
 test('HTTP settings are CSRF protected and the server schedules collection without an open webpage', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'review-http-test-')), port = 14325, base = `http://127.0.0.1:${port}`;
   const connectors = Object.fromEntries(platforms.map(platform => [platform, { status: async () => ({ connected: true, store: platform }), sync: async period => ({ reviews: [row(platform, 1)], total: 1, period, store: platform }), publish: forbidden }]));
-  const { server, store, csrf, autoSync } = await createApp({ directory, connector: connectors.naver, coupangConnector: connectors.coupang, ablyConnector: connectors.ably, ai: { configured: false, generate: forbidden }, port, maintenanceInterval: 20000 });
+  const vault={init:async()=>{},publicState:()=>({enabled:true,configured:true,blocked:false})};
+  const { server, store, csrf, autoSync } = await createApp({ directory, connector: connectors.naver, coupangConnector: connectors.coupang, ablyConnector: connectors.ably, vault, coupangVault:vault, ablyVault:vault, ai: { configured: false, generate: forbidden }, port, maintenanceInterval: 20000 });
   server.listen(port, '127.0.0.1'); await once(server, 'listening'); await Promise.allSettled([...autoSync.pending.values()]);
   t.after(async () => { autoSync.stop(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await Promise.allSettled([...autoSync.pending.values()]); await cleanupTestDirectory(directory); });
   assert.equal(store.data.reviews.length, 3); assert.deepEqual(store.data.submissions, {});

@@ -108,10 +108,13 @@ test('one shared period refreshes every top store count, survives switching tabs
   await page.locator('#period').selectOption('1m');
   await page.waitForFunction(()=>document.querySelector('#period').disabled);
   for(const p of channels) assert.equal(await page.locator(`#platform-${p}`).textContent(),'조회 중');
+  data={...data,syncProgress:{'baemin-teawest':{phase:'syncing',period:'1m',window:1,windows:1,rows:40,total:80}}};
+  await page.waitForFunction(()=>document.querySelector('#period-status').textContent.includes('40/80개 읽음'),{}, {timeout:9000});
   // One provider can finish while the others are still fetching.
-  data={...data,reviews:data.reviews.filter(r=>r.platform!=='baemin-teawest'||r.date>'2026.10.15'),syncs:{...data.syncs,'baemin-teawest':metadata('1m','partial')['baemin-teawest']}};
+  data={...data,syncProgress:{},reviews:data.reviews.filter(r=>r.platform!=='baemin-teawest'||r.date>'2026.10.15'),syncs:{...data.syncs,'baemin-teawest':metadata('1m','partial')['baemin-teawest']}};
   await page.waitForFunction(()=>document.querySelector('#platform-baemin-teawest').textContent==='1',{}, {timeout:9000});
   assert.equal(await page.locator('#platform-coupangeats-teawest').textContent(),'조회 중');
+  assert.doesNotMatch(await page.locator('#period-status').textContent(),/40\/80개 읽음/);
   finish(); await page.waitForFunction(()=>!document.querySelector('#period').disabled);
   for(const p of channels) assert.equal(await page.locator(`#platform-${p}`).textContent(),'1');
   await page.locator('.platform-tabs [data-platform="coupangeats-teawest"]').click();

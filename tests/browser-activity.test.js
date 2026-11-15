@@ -20,7 +20,7 @@ test('a hidden review tab renders during a read without switching the foreground
   const child = spawn(executable, ['--remote-debugging-port=19387', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--window-position=-2400,-2400', 'about:blank'], { windowsHide: true, stdio: 'ignore' });
   let browser;
   t.after(async () => {
-    if (browser) { const control = await browser.newBrowserCDPSession(); await control.send('Browser.close').catch(() => {}); }
+    if (browser) { const control = await browser.newBrowserCDPSession(); await control.send('Browser.close').catch(() => {}); await browser.close().catch(() => {}); }
     for (let i = 0; i < 30 && child.exitCode === null; i++) await new Promise(r => setTimeout(r, 100));
     if (child.exitCode === null) child.kill();
     await cleanupTestDirectory(profile);

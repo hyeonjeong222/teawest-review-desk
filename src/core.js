@@ -40,7 +40,9 @@ function reconcileSubmissionRecords(state, review) {
 }
 export class SerialQueue {
   tail = Promise.resolve();
-  run(fn) { const result = this.tail.then(fn, fn); this.tail = result.catch(() => {}); return result; }
+  pending = 0;
+  get busy() { return this.pending > 0; }
+  run(fn) { this.pending++; const result = this.tail.then(fn, fn).finally(() => { this.pending--; }); this.tail = result.catch(() => {}); return result; }
 }
 export async function collectReviews(store, connector, platform, period, { automatic = false, shouldRun } = {}) {
   if (automatic && shouldRun && !shouldRun()) throw new AppError('자동 가져오기를 중지했습니다.', 409, 'AUTO_SYNC_CANCELLED');

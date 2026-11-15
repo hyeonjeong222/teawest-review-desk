@@ -70,7 +70,7 @@ export async function createApp({ directory = dataDirectory(), connector, coupan
   const credentialTransfer = new CredentialTransfer({directory,auths:{naver:autoLogin,coupang:coupangAutoLogin,ably:ablyAutoLogin,...deliveryAuth},keyVault,ai,settingsQueue});
   let transferring=false;
   const aiState = () => ({ aiConfigured: ai.configured, aiKey: keyVault.publicState() });
-  const reviewState = () => ({ reviews: store.data.reviews, drafts: store.data.drafts, lastSync: store.data.lastSync, sync: store.data.sync, syncs: store.data.syncs, reviewPeriod: store.data.reviewPeriod || store.data.syncs?.naver?.period || store.data.sync?.period || '3m', autoSync: autoSync.publicState() });
+  const reviewState = () => ({ reviews: store.data.reviews, drafts: store.data.drafts, lastSync: store.data.lastSync, sync: store.data.sync, syncs: store.data.syncs, syncProgress: Object.fromEntries(Object.entries(sources).filter(([,source])=>source.connector.progress).map(([id,source])=>[id,source.connector.progress])), reviewPeriod: store.data.reviewPeriod || store.data.syncs?.naver?.period || store.data.sync?.period || '3m', autoSync: autoSync.publicState() });
   const csrf = randomBytes(32).toString('hex');
   const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   const json = (res, status, payload) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(payload)); };
@@ -227,7 +227,7 @@ export async function createApp({ directory = dataDirectory(), connector, coupan
   });
   server.requestTimeout = 120_000;
   let maintenance;
-  const maintain = () => { if (shuttingDown) return; for (const auth of [autoLogin, coupangAutoLogin, ablyAutoLogin, ...Object.values(deliveryAuth)]) void auth.schedule(); void autoSync.tick(); };
+  const maintain = () => { if (shuttingDown) return; void autoSync.tick(); for (const auth of [autoLogin, coupangAutoLogin, ablyAutoLogin, ...Object.values(deliveryAuth)]) void auth.schedule(); };
   server.on('listening', () => { if (maintenanceInterval) { maintain(); maintenance = setInterval(maintain, maintenanceInterval); maintenance.unref(); } });
   server.on('close', () => { clearInterval(maintenance); autoSync.stop(); });
   return { server, store, sources, service, coupangService, ablyService, csrf, autoLogin, coupangAutoLogin, ablyAutoLogin, deliveryAuth, deliveryAccounts, autoSync };

@@ -24,7 +24,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const state = { reviews: [], drafts: {}, filter: 'all', query: '', rating: 'all', selected: null, settings: {}, autoLogin: {}, csrf: '', aiConfigured: false, connected: false, syncing: false, generating: new Set(), suggestions: new Map(), edits: new Map(), saving: new Map(), saveTimers: new Map(), intent: null, publishing: false };
 const replyTones = new Map();
 state.platform = 'naver'; state.platforms = {}; state.syncs = {};
-state.syncRequest = null; state.syncErrors = {};
+state.syncRequest = null; state.syncErrors = {}; state.syncProgress = {};
 const periodLabels = { '1m': '최근 1개월', '3m': '최근 3개월', '6m': '최근 6개월', '1y': '최근 1년' };
 const syncInfo = platform => state.syncs[platform] || (platform === 'naver' ? state.sync : null);
 const selectedPeriod = () => state.syncRequest?.period || state.reviewPeriod || syncInfo('naver')?.period || '3m';
@@ -138,11 +138,13 @@ function renderPeriodControls() {
   $('#period').disabled = state.syncing || state.publishing;
   const applied = info ? `${platformLabel(platform)} · ${periodLabels[info.period] || '조회 기간'} · ${platformReviews().length}개` : `${platformLabel(platform)} · 가져온 리뷰 없음`;
   const limit = period === '1y' && request ? ' 배민은 기간을 나누어 1년치를 조회합니다.' : '';
+  const progress = Object.entries(state.syncProgress).filter(([,job])=>job.phase==='syncing' && job.period===period).map(([id,job])=>`${platformLabel(id)} ${job.window}/${job.windows}구간 · ${job.rows}${job.total===null?'':`/${job.total}`}개 읽음`).join(' / ');
   $('#period-status').textContent = request
     ? `전체 스토어 ${periodLabels[period]} 조회 중 (${platforms.filter(p => !waitingForPeriod(p)).length}/${platforms.length}) · 현재 목록: ${applied}.${limit}`
     : failedPeriod(platform) ? `조회 실패: ${state.syncErrors[platform].message} · 기존 목록: ${applied}.${limit}`
     : info?.period !== effectiveReviewPeriod(platform, period) ? `전체 스토어 ${periodLabels[period]} 선택 · 이 매장은 조회가 필요합니다. 기존 목록: ${applied}.${limit}`
     : applied;
+  if(progress) $('#period-status').textContent += ` ${progress}.`;
 }
 function renderStats() {
   renderPeriodControls();
@@ -271,6 +273,7 @@ async function refreshReviews() {
     const anchorId = anchor?.dataset.review, anchorTop = anchor?.getBoundingClientRect().top;
     const previous = JSON.stringify([state.reviews, state.lastSync, state.sync, state.syncs, state.reviewPeriod]);
     state.reviews = result.reviews; state.lastSync = result.lastSync; state.sync = result.sync; state.syncs = result.syncs || {};
+    state.syncProgress = result.syncProgress || {}; renderPeriodControls();
     if (result.reviewPeriod) state.reviewPeriod = result.reviewPeriod;
     if (result.autoSync) { state.autoSync = result.autoSync; renderAutoSync(); }
     // Preserve local edits while accepting confirmed replies from another tab.

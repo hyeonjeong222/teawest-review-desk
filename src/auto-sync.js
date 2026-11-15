@@ -33,7 +33,9 @@ export class AutoReviewSync {
   tick() {
     if (this.stopped || !this.config().enabled) return Promise.resolve([]);
     for (const platform of this.platforms) {
-      if (this.pending.has(platform)) continue;
+      // A manual year scan (or a reply) already owns this provider's browser.
+      // Do not queue another complete scan behind it; observe its result next tick.
+      if (this.pending.has(platform) || this.sources[platform].service.queue?.busy) continue;
       const job = this.jobs[platform], synced = this.metadata(platform)?.lastSync;
       if (synced && synced !== job.observedSync) {
         job.observedSync = synced; job.lastSuccessAt = synced; job.error = null; job.failures = 0; job.phase = 'waiting';
