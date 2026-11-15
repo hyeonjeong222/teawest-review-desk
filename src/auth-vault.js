@@ -23,7 +23,7 @@ export function windowsProtect(input, decrypt = false) {
 
 export class AuthVault {
   constructor(directory, protect = windowsProtect, { platform = 'naver' } = {}) {
-    if (!['naver', 'coupang', 'ably'].includes(platform)) throw new Error('Unsupported credential store');
+    if (!['naver', 'coupang', 'ably', 'baemin', 'coupangeats'].includes(platform)) throw new Error('Unsupported credential store');
     this.file = path.join(directory, `${platform}-auth.json`); this.protect = protect;
     this.methods = platform === 'naver' ? ['naver', 'commerce'] : [platform];
     this.defaults = { version: 1, enabled: false, encrypted: null, method: this.methods[0], blocked: null };

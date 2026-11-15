@@ -7,3 +7,4 @@ export const deliveryPlatforms = {
 export const platformLabels = { naver: '네이버', coupang: '쿠팡윙', ably: '에이블리', ...Object.fromEntries(Object.entries(deliveryPlatforms).map(([id, value]) => [id, value.label])) };
 export const platforms = Object.keys(platformLabels);
 export const replyPlatforms = ['naver', ...Object.keys(deliveryPlatforms)];
+export const effectiveReviewPeriod = (platform, period) => platform.startsWith('baemin-') && period === '1y' ? '6m' : period;

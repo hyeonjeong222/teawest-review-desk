@@ -31,7 +31,7 @@ function memoryVault() {
 test('password updates preserve the stored account, work while disabled, and require full credentials for account changes', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'review-http-test-')); t.after(() => cleanupTestDirectory(directory));
   const protect = async (value, decrypt) => decrypt ? value.slice('test-cipher:'.length) : `test-cipher:${value}`;
-  for (const platform of ['naver', 'coupang', 'ably']) {
+  for (const platform of ['naver', 'coupang', 'ably', 'baemin', 'coupangeats']) {
     const vault = new AuthVault(directory, protect, { platform }); await vault.init();
     await assert.rejects(vault.save({ enabled: true, password: 'first-password' }), /처음 연결/);
     await vault.save({ enabled: true, method: platform, username: 'saved-account', password: 'old-password' });

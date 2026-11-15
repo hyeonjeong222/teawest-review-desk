@@ -46,7 +46,10 @@ export class BaeminConnector {
   }
   async open() {
     try { await this.host.connect(); } catch { await this.host.open(false); }
-    const page = await this.getPage(true); await page.bringToFront(); return this.status();
+    let page = await this.getPage(true);
+    const shop = await this.shops(page).catch(()=>null);
+    if (shop && !page.url().startsWith(`${origin}/shops/${shop.id}/reviews`)) { this.page = await page.context().newPage(); page = this.page; await page.goto(`${origin}/shops/${shop.id}/reviews`,{waitUntil:'domcontentloaded'}); }
+    await page.bringToFront(); return this.status();
   }
   async workspace() {
     let page = await this.getPage();

@@ -16,11 +16,12 @@ import { AblyReviewService } from './ably-service.js';
 import { AutoReviewSync } from './auto-sync.js';
 import { BaeminConnector } from './baemin.js';
 import { EatsConnector } from './eats.js';
-import { deliveryPlatforms, platforms, platformLabels } from '../public/platforms.js';
-import { reviewPlatform } from './core.js';
+import { DeliveryAccountConnector } from './delivery-login.js';
+import { deliveryPlatforms, platforms, platformLabels, effectiveReviewPeriod } from '../public/platforms.js';
+import { reviewPlatform, replyLimit } from './core.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export async function createApp({ directory = path.join(root, '.local'), connector, coupangConnector, ablyConnector, deliveryConnectors = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000 } = {}) {
+export async function createApp({ directory = path.join(root, '.local'), connector, coupangConnector, ablyConnector, deliveryConnectors = {}, deliveryAccountConnectors = {}, deliveryVaults = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000 } = {}) {
   const store = new Store(directory); await store.init();
   connector ||= new NaverConnector(directory);
   const service = new ReviewService(store, connector, ai);
@@ -44,11 +45,23 @@ export async function createApp({ directory = path.join(root, '.local'), connect
     const adapter = deliveryConnectors[platform] || (config.provider === 'baemin' ? new BaeminConnector(connector, platform) : new EatsConnector(connector, platform));
     sources[platform] = { connector: adapter, service: new ReviewService(store, adapter, ai, platform, deliveryQueues[config.provider]) };
   }
+  const deliveryAuth = {}, deliveryAccounts = {};
+  for (const provider of ['baemin', 'coupangeats']) {
+    const account = deliveryAccountConnectors[provider] || new DeliveryAccountConnector(connector, provider, () => {
+      for (const [platform, config] of Object.entries(deliveryPlatforms)) if (config.provider === provider) {
+        const adapter = sources[platform].connector; adapter.probe = null;
+        if (adapter.page && !adapter.page.isClosed() && /biz-member\.baemin\.com|\/merchant\/login/.test(adapter.page.url())) adapter.page = null;
+      }
+    });
+    const credentialVault = deliveryVaults[provider] || new AuthVault(directory, undefined, { platform: provider }); await credentialVault.init();
+    deliveryAccounts[provider] = account; deliveryAuth[provider] = new AutoLogin(account, credentialVault, deliveryQueues[provider]);
+    for (const [platform, config] of Object.entries(deliveryPlatforms)) if (config.provider === provider) sources[platform].autoLogin = deliveryAuth[provider];
+  }
   const autoSync = new AutoReviewSync(store, sources);
   keyVault ||= new APIKeyVault(directory, ai); await keyVault.init();
   const settingsQueue = new SerialQueue();
   const aiState = () => ({ aiConfigured: ai.configured, aiKey: keyVault.publicState() });
-  const reviewState = () => ({ reviews: store.data.reviews, drafts: store.data.drafts, lastSync: store.data.lastSync, sync: store.data.sync, syncs: store.data.syncs, autoSync: autoSync.publicState() });
+  const reviewState = () => ({ reviews: store.data.reviews, drafts: store.data.drafts, lastSync: store.data.lastSync, sync: store.data.sync, syncs: store.data.syncs, reviewPeriod: store.data.reviewPeriod || store.data.syncs?.naver?.period || store.data.sync?.period || '3m', autoSync: autoSync.publicState() });
   const csrf = randomBytes(32).toString('hex');
   const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   const json = (res, status, payload) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(payload)); };
@@ -67,7 +80,7 @@ export async function createApp({ directory = path.join(root, '.local'), connect
       if (req.method === 'GET' && route === '/api/status') {
         const statuses = Object.fromEntries(await Promise.all(Object.entries(sources).map(async ([id, source]) => [id, { ...await source.connector.status(), ...(source.autoLogin ? { autoLogin: source.autoLogin.publicState() } : {}) }])));
         const naver = statuses.naver;
-        return json(res, 200, { ...naver, ...aiState(), autoLogin: autoLogin.publicState(), platforms: statuses });
+        return json(res, 200, { ...naver, ...aiState(), autoLogin: autoLogin.publicState(), platforms: statuses, deliveryAutoLogin: Object.fromEntries(Object.entries(deliveryAuth).map(([id, auth]) => [id, auth.publicState()])) });
       }
       if (req.method === 'GET' && route === '/api/reviews') return json(res, 200, reviewState());
       if (req.method === 'POST') {
@@ -75,7 +88,10 @@ export async function createApp({ directory = path.join(root, '.local'), connect
         const data = await body(req);
         if (route === '/api/auto-sync/settings') return json(res, 200, await autoSync.save(data));
         if (route === '/api/browser/open') {
-          if (deliveryPlatforms[data.platform]) return json(res, 200, await sources[data.platform].service.queue.run(() => sources[data.platform].connector.open()));
+          if (deliveryPlatforms[data.platform]) {
+            const provider = deliveryPlatforms[data.platform].provider, auth = deliveryAuth[provider].publicState();
+            return json(res, 200, await sources[data.platform].service.queue.run(() => auth.enabled && ['needs_verification', 'needs_attention', 'reconnecting', 'cooldown'].includes(auth.phase) ? deliveryAccounts[provider].open() : sources[data.platform].connector.open()));
+          }
           if (data.platform === 'coupang') return json(res, 200, await coupangService.queue.run(() => coupangConnector.open()));
           if (data.platform === 'ably') return json(res, 200, await ablyService.queue.run(() => ablyConnector.open()));
           if (data.platform && data.platform !== 'naver') throw new AppError('지원하지 않는 스토어입니다.');
@@ -87,15 +103,24 @@ export async function createApp({ directory = path.join(root, '.local'), connect
         if (route === '/api/auth/coupang/forget') return json(res, 200, await coupangAutoLogin.forget());
         if (route === '/api/auth/ably/settings') { const result = await ablyAutoLogin.save(data); void ablyAutoLogin.schedule(); return json(res, 200, result); }
         if (route === '/api/auth/ably/forget') return json(res, 200, await ablyAutoLogin.forget());
+        const deliveryAuthRoute = route.match(/^\/api\/auth\/(baemin|coupangeats)\/(settings|forget|open)$/);
+        if (deliveryAuthRoute) {
+          const [, provider, action] = deliveryAuthRoute, auth = deliveryAuth[provider];
+          if (action === 'settings') { const result = await auth.save(data); void auth.schedule(); return json(res, 200, result); }
+          if (action === 'forget') return json(res, 200, await auth.forget());
+          return json(res, 200, await deliveryQueues[provider].run(() => deliveryAccounts[provider].open()));
+        }
         if (route === '/api/sync') {
           const platform = data.platform || 'naver', period = data.period || '3m';
           if (![...platforms, 'all'].includes(platform)) throw new AppError('지원하지 않는 스토어입니다.');
+          if (!['1m', '3m', '6m', '1y'].includes(period)) throw new AppError('지원하지 않는 조회 기간입니다.');
           if (deliveryPlatforms[platform]) await sources[platform].service.sync(period);
           if (platform === 'naver') await service.sync(period);
           if (platform === 'coupang') await coupangService.sync(period);
           if (platform === 'ably') await ablyService.sync(period);
           if (platform === 'all') {
-            const results = await Promise.allSettled(platforms.map(id => sources[id].service.sync(period))); 
+            await store.update(s => { s.reviewPeriod = period; });
+            const results = await Promise.allSettled(platforms.map(id => sources[id].service.sync(effectiveReviewPeriod(id, period))));
             if (results[0].status === 'rejected' && results[0].reason.code === 'LOGIN_REQUIRED') void autoLogin.schedule();
             if (results[1].status === 'rejected' && results[1].reason.code === 'COUPANG_LOGIN_REQUIRED') void coupangAutoLogin.schedule();
             if (results[2].status === 'rejected' && results[2].reason.code === 'ABLY_LOGIN_REQUIRED') void ablyAutoLogin.schedule();
@@ -107,9 +132,12 @@ export async function createApp({ directory = path.join(root, '.local'), connect
         }
         if (route === '/api/settings') return json(res, 200, await settingsQueue.run(async () => {
           const settings = { ...store.data.settings };
+          if (data.platform !== undefined && !deliveryPlatforms[data.platform]) throw new AppError('지원하지 않는 매장입니다.');
+          const delivery = data.platform ? { tone:'따뜻하고 정중하게', guidance:'', ...settings.delivery?.[data.platform] } : null;
           for (const [field, max] of [['brand', 80], ['tone', 200], ['guidance', 2000], ['model', 100]]) {
-            if (data[field] !== undefined) { if (typeof data[field] !== 'string' || data[field].length > max) throw new AppError('설정 내용의 길이를 확인해 주세요.'); settings[field] = data[field].trim(); }
+            if (data[field] !== undefined) { if (typeof data[field] !== 'string' || data[field].length > max) throw new AppError('설정 내용의 길이를 확인해 주세요.'); if (delivery && ['tone','guidance'].includes(field)) delivery[field] = data[field].trim(); else if (!(delivery && field === 'brand')) settings[field] = data[field].trim(); }
           }
+          if (delivery) settings.delivery = { ...settings.delivery, [data.platform]: delivery };
           if (!settings.brand || !/^[a-zA-Z0-9._-]+$/.test(settings.model)) throw new AppError('브랜드명과 모델명을 확인해 주세요.');
           if (data.apiKey !== undefined && typeof data.apiKey !== 'string') throw new AppError('OpenAI API 키 형식을 확인해 주세요.');
           if (data.apiKey && data.disconnectAI === true) throw new AppError('API 키 저장과 삭제는 따로 진행해 주세요.');
@@ -126,7 +154,7 @@ export async function createApp({ directory = path.join(root, '.local'), connect
           if (!selectedService) throw new AppError('지원하지 않는 스토어입니다.');
           if (action !== 'detail') assertReplyable(store.review(id));
           if (action === 'draft') {
-            if (typeof data.text !== 'string' || data.text.length > 1000) throw new AppError('초안은 1,000자 이하로 작성해 주세요.');
+            if (typeof data.text !== 'string' || data.text.length > replyLimit(review)) throw new AppError(`초안은 ${replyLimit(review)}자 이하로 작성해 주세요.`);
             if (store.review(id).hasReply) throw new AppError('이미 등록된 리뷰입니다.', 409);
             await store.update(s => { s.drafts[id] = { text: data.text, savedAt: new Date().toISOString() }; }); return json(res, 200, { saved: true });
           }
@@ -146,16 +174,17 @@ export async function createApp({ directory = path.join(root, '.local'), connect
       if (error.code === 'LOGIN_REQUIRED') void autoLogin.schedule();
       if (error.code === 'COUPANG_LOGIN_REQUIRED') void coupangAutoLogin.schedule();
       if (error.code === 'ABLY_LOGIN_REQUIRED') void ablyAutoLogin.schedule();
+      if (error.code === 'DELIVERY_LOGIN_REQUIRED') for (const auth of Object.values(deliveryAuth)) void auth.schedule();
       if (error instanceof AppError) json(res, error.status, { error: error.message, code: error.code });
       else { console.error(`[${new Date().toISOString()}] ${error.name}: request failed`); json(res, 500, { error: '작업을 완료하지 못했습니다. 스토어 연결 상태를 확인하고 다시 시도해 주세요.', code: 'INTERNAL_ERROR' }); }
     }
   });
   server.requestTimeout = 120_000;
   let maintenance;
-  const maintain = () => { void autoLogin.schedule(); void coupangAutoLogin.schedule(); void ablyAutoLogin.schedule(); void autoSync.tick(); };
+  const maintain = () => { for (const auth of [autoLogin, coupangAutoLogin, ablyAutoLogin, ...Object.values(deliveryAuth)]) void auth.schedule(); void autoSync.tick(); };
   server.on('listening', () => { if (maintenanceInterval) { maintain(); maintenance = setInterval(maintain, maintenanceInterval); maintenance.unref(); } });
   server.on('close', () => { clearInterval(maintenance); autoSync.stop(); });
-  return { server, store, sources, service, coupangService, ablyService, csrf, autoLogin, coupangAutoLogin, ablyAutoLogin, autoSync };
+  return { server, store, sources, service, coupangService, ablyService, csrf, autoLogin, coupangAutoLogin, ablyAutoLogin, deliveryAuth, deliveryAccounts, autoSync };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4317); const { server } = await createApp({ port });

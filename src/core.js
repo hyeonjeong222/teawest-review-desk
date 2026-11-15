@@ -8,6 +8,7 @@ export class AppError extends Error {
 }
 export const fingerprint = r => createHash('sha256').update(JSON.stringify([r.id, r.productId, r.content, r.rating, r.store])).digest('hex');
 export const reviewPlatform = r => r.platform || 'naver';
+export const replyLimit = review => reviewPlatform(review).startsWith('coupangeats-') ? 300 : 1000;
 export function assertReplyable(review) {
   if (!replyPlatforms.includes(reviewPlatform(review)) || review.readOnly === true) throw new AppError('이 스토어의 리뷰는 조회 전용입니다. 답글 작성·추천·등록은 지원하지 않습니다.', 403, 'READ_ONLY_REVIEW');
 }
@@ -19,8 +20,8 @@ export function sortReviews(reviews) {
   };
   return reviews.sort((a, b) => timestamp(b) - timestamp(a) || String(b.id).localeCompare(String(a.id)));
 }
-export function validateReply(text) {
-  if (typeof text !== 'string' || text.trim().length < 5 || text.trim().length > 1000) throw new AppError('답글은 5~1,000자로 작성해 주세요.');
+export function validateReply(text, maxLength = 1000) {
+  if (typeof text !== 'string' || text.trim().length < 5 || text.trim().length > maxLength) throw new AppError(`답글은 5~${maxLength.toLocaleString('ko-KR')}자로 작성해 주세요.`);
   return text.trim();
 }
 export function assertSameReview(expected, actual) {
@@ -100,13 +101,18 @@ export class ReviewService {
   async suggest(id, tone) {
     const review = this.store.review(id);
     assertReplyable(review);
+    if (reviewPlatform(review) !== this.platform) throw new AppError('선택한 매장이 다릅니다.',409,'STORE_CHANGED');
     if (review.hasReply) throw new AppError('이미 답글이 등록된 리뷰입니다.', 409, 'ALREADY_REPLIED');
     if (tone !== undefined && (typeof tone !== 'string' || !tone.trim() || tone.trim().length > 200)) throw new AppError('추천 말투는 1~200자로 입력해 주세요.', 400, 'INVALID_TONE');
-    const settings = { ...this.store.data.settings, brand: deliveryPlatforms[this.platform]?.brand || this.store.data.settings.brand, tone: tone === undefined ? this.store.data.settings.tone : tone.trim() };
-    return { text: await this.ai.generate(review, settings), tone: settings.tone };
+    const delivery = deliveryPlatforms[this.platform];
+    const preferences = delivery ? this.store.data.settings.delivery?.[this.platform] || { tone:'따뜻하고 정중하게', guidance:'' } : this.store.data.settings;
+    const settings = { ...this.store.data.settings, ...preferences, brand: delivery?.brand || this.store.data.settings.brand, tone: tone === undefined ? preferences.tone : tone.trim() };
+    return { text: validateReply(await this.ai.generate(review, settings), replyLimit(review)), tone: settings.tone };
   }
   prepare(id, text, expectedFingerprint, token) {
-    const r = this.store.review(id); assertReplyable(r); text = validateReply(text);
+    const r = this.store.review(id); assertReplyable(r); text = validateReply(text, replyLimit(r));
+    if (reviewPlatform(r) !== this.platform) throw new AppError('선택한 매장이 다릅니다.',409,'STORE_CHANGED');
+    if (r.replyAllowed === false && !r.hasReply) throw new AppError('해당 서비스에서 이 리뷰의 답글 등록을 허용하지 않습니다.',409,'REPLY_UNAVAILABLE');
     if (r.hasReply) throw new AppError('이미 답글이 등록된 리뷰입니다.', 409, 'ALREADY_REPLIED');
     if (fingerprint(r) !== expectedFingerprint) throw new AppError('리뷰가 변경되었습니다. 다시 확인해 주세요.', 409);
     this.intents.set(token, { id, text, fingerprint: expectedFingerprint, expires: Date.now() + 5 * 60_000 });
@@ -119,10 +125,12 @@ export class ReviewService {
     return this.queue.run(async () => {
       const expected = this.store.review(id);
       assertReplyable(expected);
+      if (reviewPlatform(expected) !== this.platform) throw new AppError('선택한 매장이 다릅니다.',409,'STORE_CHANGED');
       if (fingerprint(expected) !== intent.fingerprint) throw new AppError('리뷰가 변경되었습니다.', 409, 'REVIEW_CHANGED');
       if (expected.hasReply) throw new AppError('이미 답글이 등록된 리뷰입니다.', 409, 'ALREADY_REPLIED');
       const attemptKey = `${id}:${createHash('sha256').update(intent.text).digest('hex')}`;
       const previous = this.store.data.submissions[attemptKey];
+      if (Object.values(this.store.data.submissions).some(a => a.reviewId === id && ['attempting','uncertain'].includes(a.state))) throw new AppError('이 리뷰의 이전 등록 결과가 아직 확인되지 않았습니다. 답글 확인을 눌러 주세요.',409,'DUPLICATE_ATTEMPT');
       if (previous && ['attempting', 'uncertain', 'sent'].includes(previous.state)) throw new AppError('이 답글의 등록을 이미 요청했습니다. 새로고침하거나 기존 답글을 확인해 주세요.', 409, 'DUPLICATE_ATTEMPT');
       let attempted = false;
       try {

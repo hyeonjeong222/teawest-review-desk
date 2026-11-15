@@ -1,4 +1,4 @@
-import { deliveryPlatforms, platforms, replyPlatforms, platformLabels } from './platforms.js';
+import { deliveryPlatforms, platforms, replyPlatforms, platformLabels, effectiveReviewPeriod } from './platforms.js';
 const icons = {
   inbox: '<path d="M4 4h16l2 10v6H2v-6L4 4Z"/><path d="M2 14h6l2 3h4l2-3h6"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -24,10 +24,18 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 const state = { reviews: [], drafts: {}, filter: 'all', query: '', rating: 'all', selected: null, settings: {}, autoLogin: {}, csrf: '', aiConfigured: false, connected: false, syncing: false, generating: new Set(), suggestions: new Map(), edits: new Map(), saving: new Map(), saveTimers: new Map(), intent: null, publishing: false };
 const replyTones = new Map();
 state.platform = 'naver'; state.platforms = {}; state.syncs = {};
-const platformOf = r => r.platform || 'naver';
+state.syncRequest = null; state.syncErrors = {};
+const periodLabels = { '1m': '최근 1개월', '3m': '최근 3개월', '6m': '최근 6개월', '1y': '최근 1년' };
+const syncInfo = platform => state.syncs[platform] || (platform === 'naver' ? state.sync : null);
+const selectedPeriod = () => state.syncRequest?.period || state.reviewPeriod || syncInfo('naver')?.period || '3m';
+const waitingForPeriod = platform => Boolean(state.syncRequest && syncInfo(platform)?.lastSync === state.syncRequest.baselines[platform]);
+const failedPeriod = platform => state.syncErrors[platform] && state.syncErrors[platform].lastSync === syncInfo(platform)?.lastSync;
+const platformOf = r => r?.platform || 'naver';
 const canReply = r => replyPlatforms.includes(platformOf(r)) && r.readOnly !== true;
+const replyLimit = r => platformOf(r).startsWith('coupangeats-') ? 300 : 1000;
 const reviewConnected = r => r && (platformOf(r) === 'naver' ? state.connected : Boolean(state.platforms[platformOf(r)]?.connected));
 const platformLabel = value => value === 'all' ? '전체' : platformLabels[value];
+const storePreferences = platform => deliveryPlatforms[platform] ? { tone: '따뜻하고 정중하게', guidance: '', ...state.settings.delivery?.[platform], brand: deliveryPlatforms[platform].brand } : state.settings;
 const platformReviews = () => state.reviews.filter(r => platformOf(r) === state.platform);
 let reviewRevision = 0;
 for (const [platform, config] of Object.entries(deliveryPlatforms)) {
@@ -35,6 +43,74 @@ for (const [platform, config] of Object.entries(deliveryPlatforms)) {
   $('.platform-tabs').insertAdjacentHTML('beforeend', `<button data-platform="${platform}">${config.label} <span id="platform-${platform}">0</span></button>`);
 }
 $('#delivery-connect-button').addEventListener('click', () => openBrowser(state.platform));
+const connectionProviderLabel = provider => provider === 'baemin' ? '배달의민족' : '쿠팡이츠';
+state.deliveryAutoLogin = {};
+function providerPlatform(provider) {
+  return deliveryPlatforms[state.platform]?.provider === provider ? state.platform : Object.keys(deliveryPlatforms).find(p => deliveryPlatforms[p].provider === provider);
+}
+function renderDeliverySettings() {
+  const platform = $('#delivery-settings-store').value, provider = $('#delivery-settings-dialog').dataset.provider, status = state.platforms[platform] || {}, auth = state.deliveryAutoLogin[provider] || {};
+  $('#delivery-settings-status').textContent = deliveryAuthMessage(provider, status, auth);
+  $('#delivery-auth-forget').disabled = !auth.configured || Boolean(state.savingDeliveryAuth);
+  $('#delivery-auth-save').disabled = Boolean(state.savingDeliveryAuth);
+}
+function deliveryAuthMessage(provider, status, auth) {
+  if (auth.phase === 'reconnecting') return '저장된 로그인 정보로 다시 연결하고 있습니다.';
+  if (auth.blocked === 'verification' || auth.phase === 'needs_verification') return '추가 인증이 필요합니다. 연결 창에서 인증·보안 문자 등을 직접 완료하면 자동으로 다시 확인합니다.';
+  if (auth.blocked === 'invalid_credentials') return '아이디 또는 비밀번호가 올바르지 않습니다. 새 비밀번호를 입력하고 저장해 주세요.';
+  if (auth.blocked === 'storage_error') return '저장된 정보를 읽지 못했습니다. 아이디와 비밀번호를 다시 입력해 주세요.';
+  if (auth.blocked) return '자동 로그인을 완료하지 못했습니다. 연결 창을 확인한 뒤 설정을 저장하면 다시 시도합니다.';
+  if (auth.phase === 'offline' || status.networkError) return '인터넷 또는 판매자센터 연결을 확인해 주세요. 기존 리뷰와 초안은 유지됩니다.';
+  if (auth.phase === 'cooldown') return '로그인이 반복해서 만료되어 잠시 후 다시 연결합니다. 연결 창에서 직접 로그인할 수도 있습니다.';
+  if (status.connected) return `${connectionProviderLabel(provider)} 연결됨${auth.enabled ? ' · 자동 로그인 켜짐' : ''}${status.storeName ? ' · ' + status.storeName : ''}`;
+  return auth.enabled ? '자동 연결을 확인하고 있습니다. 추가 인증이 필요하면 알려드립니다.' : '아이디와 비밀번호를 저장해 자동 로그인을 켜거나 연결 창에서 직접 로그인해 주세요.';
+}
+async function openDeliverySettings(provider) {
+  if (state.savingDeliveryAuth) return;
+  $('#delivery-settings-dialog').dataset.provider = provider;
+  $('#delivery-settings-title').textContent = `${connectionProviderLabel(provider)} 연결 설정`;
+  $('#delivery-settings-store').innerHTML = Object.entries(deliveryPlatforms).filter(([, config]) => config.provider === provider).map(([id, config]) => `<option value="${id}">${esc(config.brand)}</option>`).join('');
+  $('#delivery-settings-store').value = providerPlatform(provider); $('#delivery-settings-message').textContent = '';
+  $('#delivery-auth-username').value = ''; $('#delivery-auth-password').value = '';
+  await refreshStatus(); if ($('#delivery-settings-dialog').dataset.provider !== provider) return;
+  const auth = state.deliveryAutoLogin[provider] || {};
+  $('#delivery-auth-enabled').checked = auth.configured ? Boolean(auth.enabled) : true;
+  $('#delivery-auth-username-label').textContent = provider === 'baemin' ? '배민비즈회원 아이디' : '쿠팡이츠 사장님 아이디';
+  $('#delivery-auth-username').placeholder = auth.configured ? '저장된 아이디 사용 · 계정 변경 시 입력' : '처음 연결할 때 입력';
+  $('#delivery-auth-password').placeholder = auth.configured ? '변경한 새 비밀번호 입력 · 비우면 유지' : '처음 연결할 때 입력';
+  renderDeliverySettings(); $('#delivery-settings-dialog').showModal();
+}
+$('#baemin-auth-open').addEventListener('click', () => openDeliverySettings('baemin'));
+$('#eats-auth-open').addEventListener('click', () => openDeliverySettings('coupangeats'));
+$('#delivery-settings-store').addEventListener('change', renderDeliverySettings);
+$('#delivery-settings-browser').addEventListener('click', async () => {
+  const button = $('#delivery-settings-browser'); button.disabled = true;
+  const provider = $('#delivery-settings-dialog').dataset.provider;
+  try { await api(`/api/auth/${provider}/open`, {}); await refreshStatus(); $('#delivery-settings-message').textContent = '추가 인증이 나오면 열린 연결 창에서 직접 완료해 주세요.'; }
+  catch (error) { $('#delivery-settings-message').textContent = error.message; }
+  finally { button.disabled = false; }
+});
+$('#delivery-auth-form').addEventListener('submit', async event => {
+  event.preventDefault(); if (state.savingDeliveryAuth) return;
+  const provider = $('#delivery-settings-dialog').dataset.provider;
+  state.savingDeliveryAuth = true; renderDeliverySettings();
+  try {
+    state.deliveryAutoLogin[provider] = await api(`/api/auth/${provider}/settings`, { enabled: $('#delivery-auth-enabled').checked, method: provider, username: $('#delivery-auth-username').value, password: $('#delivery-auth-password').value });
+    $('#delivery-auth-username').value = ''; $('#delivery-auth-password').value = ''; $('#delivery-settings-dialog').close();
+    await refreshStatus(); toast(`${connectionProviderLabel(provider)} 로그인 정보를 저장했습니다. 다음 로그인부터 적용됩니다.`);
+  } catch (error) { $('#delivery-settings-message').textContent = error.message; }
+  finally { state.savingDeliveryAuth = false; renderDeliverySettings(); }
+});
+$('#delivery-auth-forget').addEventListener('click', async () => {
+  if (state.savingDeliveryAuth) return; const provider = $('#delivery-settings-dialog').dataset.provider;
+  state.savingDeliveryAuth = true; renderDeliverySettings();
+  try { state.deliveryAutoLogin[provider] = await api(`/api/auth/${provider}/forget`, {}); $('#delivery-auth-username').value = ''; $('#delivery-auth-password').value = ''; $('#delivery-auth-enabled').checked = false; $('#delivery-settings-message').textContent = '이 서비스의 저장된 로그인 정보를 삭제했습니다. 현재 로그인과 리뷰는 유지됩니다.'; await refreshStatus(); }
+  catch (error) { $('#delivery-settings-message').textContent = error.message; }
+  finally { state.savingDeliveryAuth = false; renderDeliverySettings(); }
+});
+$('#delivery-settings-dialog').addEventListener('close', () => { $('#delivery-auth-username').value = ''; $('#delivery-auth-password').value = ''; });
+for (const button of document.querySelectorAll('[data-delivery-center]')) button.addEventListener('click', () => openBrowser(providerPlatform(button.dataset.deliveryCenter)));
+$('#naver-open').addEventListener('click', () => openBrowser('naver'));
 const tonePresets = ['따뜻하고 정중하게', '친근하고 밝게', '간결하고 담백하게', '공감하며 차분하게', '격식 있고 정중하게'];
 for (const el of document.querySelectorAll('[data-icon]')) el.replaceWith(document.createRange().createContextualFragment(icon(el.dataset.icon)));
 async function api(route, data) {
@@ -50,14 +126,27 @@ function matchesRating(r) {
   if (state.rating === 'satisfied' || state.rating === 'unsatisfied') return platformOf(r) === 'ably' && r.satisfaction === (state.rating === 'satisfied');
   return Number.isFinite(r.rating) && (state.rating === 'low' ? r.rating <= 3 : r.rating === Number(state.rating));
 }
-function reviewState(r) { return !canReply(r) ? 'readonly' : r.hasReply ? 'replied' : state.drafts[r.id]?.text?.trim() ? 'draft' : 'pending'; }
-function badge(r) { const status = reviewState(r); return `<span class="badge ${status}">${{ pending: '답글 대기', draft: '작성 중', replied: '등록 완료', readonly: '조회 전용' }[status]}</span>`; }
+function reviewState(r) { return !canReply(r) ? 'readonly' : r.hasReply ? 'replied' : r.replyAllowed === false ? 'expired' : state.drafts[r.id]?.text?.trim() ? 'draft' : 'pending'; }
+function badge(r) { const status = reviewState(r); return `<span class="badge ${status}">${{ pending: '답글 대기', draft: '작성 중', replied: '등록 완료', readonly: '조회 전용', expired: '등록 기간 종료' }[status]}</span>`; }
 function current() { return state.reviews.find(r => r.id === state.selected); }
 function filtered() {
-  return platformReviews().filter(r => (state.filter === 'all' || (state.filter === 'pending' ? canReply(r) && !r.hasReply : reviewState(r) === state.filter)) && matchesRating(r) && `${r.content} ${r.product} ${r.author}`.toLowerCase().includes(state.query.toLowerCase()));
+  return platformReviews().filter(r => (state.filter === 'all' || (state.filter === 'pending' ? canReply(r) && r.replyAllowed !== false && !r.hasReply : reviewState(r) === state.filter)) && matchesRating(r) && `${r.content} ${r.product} ${r.author}`.toLowerCase().includes(state.query.toLowerCase()));
+}
+function renderPeriodControls() {
+  const platform = state.platform, info = syncInfo(platform), request = state.syncRequest;
+  const period = selectedPeriod(); $('#period').value = period;
+  $('#period').disabled = state.syncing || state.publishing;
+  const applied = info ? `${platformLabel(platform)} · ${periodLabels[info.period] || '조회 기간'} · ${platformReviews().length}개` : `${platformLabel(platform)} · 가져온 리뷰 없음`;
+  const limit = period === '1y' ? ' 배민은 최대 6개월로 조회합니다.' : '';
+  $('#period-status').textContent = request
+    ? `전체 스토어 ${periodLabels[period]} 조회 중 (${platforms.filter(p => !waitingForPeriod(p)).length}/${platforms.length}) · 현재 목록: ${applied}.${limit}`
+    : failedPeriod(platform) ? `조회 실패 · 기존 목록: ${applied}. 다시 새로고침해 주세요.${limit}`
+    : info?.period !== effectiveReviewPeriod(platform, period) ? `전체 스토어 ${periodLabels[period]} 선택 · 이 매장은 조회가 필요합니다. 기존 목록: ${applied}.${limit}`
+    : `전체 스토어 ${periodLabels[period]} · 현재 목록: ${applied}.${limit}`;
 }
 function renderStats() {
-  const all = platformReviews(), replyable = all.filter(canReply), replied = replyable.filter(r => r.hasReply).length, pending = replyable.length - replied, drafts = replyable.filter(r => reviewState(r) === 'draft').length;
+  renderPeriodControls();
+  const all = platformReviews(), replyable = all.filter(r => canReply(r) && (r.hasReply || r.replyAllowed !== false)), replied = replyable.filter(r => r.hasReply).length, pending = replyable.length - replied, drafts = replyable.filter(r => reviewState(r) === 'draft').length;
   const rated = all.filter(r => Number.isFinite(r.rating)), avg = rated.length ? rated.reduce((s, r) => s + r.rating, 0) / rated.length : 0;
   $('#stat-total').textContent = all.length; $('#stat-pending').textContent = pending; $('#stat-rate').textContent = replyable.length ? Math.round(100 * replied / replyable.length) : '—';
   $('#rate-bar').style.width = `${replyable.length ? 100 * replied / replyable.length : 0}%`;
@@ -68,7 +157,15 @@ function renderStats() {
   $('#stat-stars').classList.toggle('rating-caption', isAbly);
   for (const option of $('#rating-filter').options) { const satisfaction = ['satisfied', 'unsatisfied'].includes(option.value); option.hidden = option.value !== 'all' && (isAbly ? !satisfaction : satisfaction); option.disabled = option.hidden; }
   for (const [key, value] of Object.entries({ pending, draft: drafts, replied })) $(`#nav-${key}`).textContent = value;
-  for (const platform of platforms) $(`#platform-${platform}`).textContent = state.reviews.filter(r => platformOf(r) === platform).length;
+  for (const platform of platforms) {
+    const info = syncInfo(platform), period = effectiveReviewPeriod(platform, selectedPeriod());
+    const text = waitingForPeriod(platform) ? '조회 중' : failedPeriod(platform) ? '조회 실패' : info?.period !== period ? '조회 필요' : String(state.reviews.filter(r => platformOf(r) === platform).length);
+    const count = $(`#platform-${platform}`); count.textContent = text;
+    const limited = period !== selectedPeriod();
+    const note = count.parentElement.querySelector('.platform-period-limit'); if (note) note.remove();
+    if (limited) count.insertAdjacentHTML('afterend', '<small class="platform-period-limit">최대 6개월</small>');
+    count.parentElement.title = `${platformLabel(platform)} · ${periodLabels[period]} · ${text}${/^\d+$/.test(text) ? '개' : ''}`;
+  }
   for (const button of document.querySelectorAll('[data-platform]')) { const active = button.dataset.platform === state.platform; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); }
   const readOnly = ['coupang', 'ably'].includes(state.platform);
   for (const stat of document.querySelectorAll('[data-reply-stat]')) stat.hidden = readOnly;
@@ -85,9 +182,6 @@ function selectPlatform(platform) {
   if (!platforms.includes(platform)) return;
   if (state.platform !== platform) { state.query = ''; state.rating = 'all'; $('#search').value = ''; $('#rating-filter').value = 'all'; }
   state.platform = platform; state.filter = 'all';
-  const year = $('#period').querySelector('[value="1y"]'); year.disabled = platform.startsWith('baemin-'); year.hidden = year.disabled; if (year.disabled && $('#period').value === '1y') $('#period').value = '6m';
-  const period = state.syncs[platform]?.period || (platform === 'naver' ? state.sync?.period : null);
-  if (period) $('#period').value = period;
   const rows = filtered(); if (!rows.some(r => r.id === state.selected)) state.selected = rows[0]?.id || null;
   renderStats(); renderConnections(); renderList(); renderDetail();
 }
@@ -104,7 +198,7 @@ function renderReadOnlyDetail(r) {
 }
 function renderToneControls(id, disabled) {
   const choice = replyTones.get(id) || { value: 'default', custom: '' };
-  const options = [['default', `브랜드 기본 · ${state.settings.tone || '따뜻하고 정중하게'}`], ...tonePresets.map(tone => [tone, tone]), ['custom', '직접 설정하기']];
+  const options = [['default', `브랜드 기본 · ${storePreferences(platformOf(state.reviews.find(r => r.id === id))).tone || '따뜻하고 정중하게'}`], ...tonePresets.map(tone => [tone, tone]), ['custom', '직접 설정하기']];
   $('#reply-editor')?.closest('.editor-wrap').insertAdjacentHTML('beforebegin', `<div class="tone-controls"><label for="reply-tone">이번 추천의 말투</label><select id="reply-tone" ${disabled ? 'disabled' : ''}>${options.map(([value, label]) => `<option value="${esc(value)}" ${choice.value === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select><div id="custom-tone-wrap" ${choice.value === 'custom' ? '' : 'hidden'}><label for="reply-tone-custom">원하는 말투 직접 입력</label><textarea id="reply-tone-custom" maxlength="200" rows="2" placeholder="예: 단골 고객에게 말하듯 다정하게, 이모지 없이 짧게" ${disabled ? 'disabled' : ''}>${esc(choice.custom)}</textarea></div><p>이 리뷰의 추천에만 적용됩니다. 말투를 바꾼 뒤 다시 추천받을 수 있어요.</p></div>`);
   $('#reply-tone')?.addEventListener('change', event => {
     const next = { ...choice, ...replyTones.get(id), value: event.target.value }; replyTones.set(id, next);
@@ -117,9 +211,9 @@ function renderDetail() {
   const r = current();
   if (!r) { $('#detail-panel').innerHTML = `<div class="empty detail-empty">${icon('messages')}<h3>고객의 이야기를 선택해 주세요</h3><p>리뷰를 선택하면 내용을 확인하고<br>추천 답글을 받아볼 수 있어요.</p></div>`; return; }
   if (!canReply(r)) { renderReadOnlyDetail(r); return; }
-  const label = platformLabel(platformOf(r));
+  const label = platformLabel(platformOf(r)), maxLength = replyLimit(r);
   const draft = state.drafts[r.id]?.text || '', generating = state.generating.has(r.id), suggestion = state.suggestions.get(r.id);
-  $('#detail-panel').innerHTML = `<div class="detail-top"><h2>리뷰 상세</h2><span class="detail-id">#${r.id}</span></div><div class="detail-content"><div class="product-info"><span class="product-icon">${icon('bag')}</span><div><small>구매한 상품</small><a href="${esc(r.productUrl)}" target="_blank" rel="noreferrer">${esc(r.product)} ${icon('external')}</a>${r.option ? `<small>${esc(r.option)}</small>` : ''}</div></div><div class="review-meta"><span class="card-person">${esc(r.author)}<span class="card-date">${esc(r.date)}</span></span>${badge(r)}</div><div class="detail-rating">${ratingMarkup(r)}</div><p class="original-review">${esc(r.content || '텍스트 없는 리뷰입니다.')}</p>${r.media?.length ? `<div class="media-row">${r.media.map(url => `<a href="${esc(url)}" target="_blank" rel="noreferrer"><img src="${esc(url)}" alt="고객이 첨부한 리뷰 사진" loading="lazy" referrerpolicy="no-referrer"></a>`).join('')}</div>` : ''}</div><div class="reply-section"><div class="reply-section-head"><span class="reply-title">${icon(r.hasReply ? 'check-circle' : 'sparkles')}${r.hasReply ? '등록된 답글' : '답글 작성'}</span>${!r.hasReply ? `<button id="generate-button" class="ai-button ${generating ? 'busy' : ''}" ${generating || state.publishing ? 'disabled' : ''}>${icon('sparkles')}${generating ? '추천 작성 중' : 'GPT 추천받기'}</button>` : ''}</div>${r.hasReply ? `<div class="posted-reply">${r.reply ? esc(r.reply) : `이미 답글이 등록되어 있어요. 아래 ‘${label} 답글 확인’을 누르면 내용을 가져옵니다.`}</div><p class="posted-info">${label}에 등록된 답글입니다.${r.replyDate ? ` · ${esc(r.replyDate)}` : ''}</p>` : `<div class="editor-wrap"><textarea id="reply-editor" maxlength="1000" aria-label="판매자 답글" placeholder="고객에게 전할 답글을 작성해 주세요.&#10;GPT 추천을 받은 뒤 자유롭게 수정할 수 있어요." ${state.publishing ? 'disabled' : ''}>${esc(draft)}</textarea><div class="editor-meta"><span id="draft-status">${draft ? '초안 저장됨' : '작성한 내용은 초안으로 저장됩니다'}</span><span><span id="char-count">${draft.length}</span> / 1,000</span></div></div>${suggestion ? `<div class="suggestion-preview"><span class="reply-title">${icon('sparkles')}새 추천 답글</span><p>${esc(suggestion)}</p><button class="button secondary" id="apply-suggestion">이 추천으로 바꾸기</button></div>` : ''}<div class="reply-helper">${icon('info')}추천 문구를 확인하고 브랜드의 말투로 다듬어 주세요.</div>`}</div><div class="reply-actions"><button class="text-button" id="load-reply">${label} 답글 확인 ${icon('external')}</button>${!r.hasReply ? `<button class="button primary" id="prepare-publish" ${draft.trim().length < 5 || !reviewConnected(r) || state.publishing || generating ? 'disabled' : ''}>${icon('send')}등록 내용 확인</button>` : `<span class="badge replied">${icon('check-circle')} 등록 완료</span>`}</div>`;
+  $('#detail-panel').innerHTML = `<div class="detail-top"><h2>리뷰 상세</h2><span class="detail-id">#${r.id}</span></div><div class="detail-content"><div class="product-info"><span class="product-icon">${icon('bag')}</span><div><small>구매한 상품</small><a href="${esc(r.productUrl)}" target="_blank" rel="noreferrer">${esc(r.product)} ${icon('external')}</a>${r.option ? `<small>${esc(r.option)}</small>` : ''}</div></div><div class="review-meta"><span class="card-person">${esc(r.author)}<span class="card-date">${esc(r.date)}</span></span>${badge(r)}</div><div class="detail-rating">${ratingMarkup(r)}</div><p class="original-review">${esc(r.content || '텍스트 없는 리뷰입니다.')}</p>${r.media?.length ? `<div class="media-row">${r.media.map(url => `<a href="${esc(url)}" target="_blank" rel="noreferrer"><img src="${esc(url)}" alt="고객이 첨부한 리뷰 사진" loading="lazy" referrerpolicy="no-referrer"></a>`).join('')}</div>` : ''}</div><div class="reply-section"><div class="reply-section-head"><span class="reply-title">${icon(r.hasReply ? 'check-circle' : 'sparkles')}${r.hasReply ? '등록된 답글' : '답글 작성'}</span>${!r.hasReply ? `<button id="generate-button" class="ai-button ${generating ? 'busy' : ''}" ${generating || state.publishing ? 'disabled' : ''}>${icon('sparkles')}${generating ? '추천 작성 중' : 'GPT 추천받기'}</button>` : ''}</div>${r.hasReply ? `<div class="posted-reply">${r.reply ? esc(r.reply) : `이미 답글이 등록되어 있어요. 아래 ‘${label} 답글 확인’을 누르면 내용을 가져옵니다.`}</div><p class="posted-info">${label}에 등록된 답글입니다.${r.replyDate ? ` · ${esc(r.replyDate)}` : ''}</p>` : `<div class="editor-wrap"><textarea id="reply-editor" maxlength="${maxLength}" aria-label="판매자 답글" placeholder="고객에게 전할 답글을 작성해 주세요.&#10;GPT 추천을 받은 뒤 자유롭게 수정할 수 있어요." ${state.publishing ? 'disabled' : ''}>${esc(draft)}</textarea><div class="editor-meta"><span id="draft-status">${draft ? '초안 저장됨' : '작성한 내용은 초안으로 저장됩니다'}</span><span><span id="char-count">${draft.length}</span> / ${maxLength.toLocaleString('ko-KR')}</span></div></div>${suggestion ? `<div class="suggestion-preview"><span class="reply-title">${icon('sparkles')}새 추천 답글</span><p>${esc(suggestion)}</p><button class="button secondary" id="apply-suggestion">이 추천으로 바꾸기</button></div>` : ''}<div class="reply-helper">${icon('info')}${r.replyAllowed === false ? '이 리뷰는 서비스의 댓글 등록 가능 기간·상태를 확인해 주세요.' : '추천 문구를 확인하고 브랜드의 말투로 다듬어 주세요.'}</div>`}</div><div class="reply-actions"><button class="text-button" id="load-reply">${label} 답글 확인 ${icon('external')}</button>${!r.hasReply ? `<button class="button primary" id="prepare-publish" ${draft.trim().length < 5 || draft.length > maxLength || r.replyAllowed === false || !reviewConnected(r) || state.publishing || generating ? 'disabled' : ''}>${icon('send')}등록 내용 확인</button>` : `<span class="badge replied">${icon('check-circle')} 등록 완료</span>`}</div>`;
   if (!r.hasReply) renderToneControls(r.id, generating || state.publishing);
   $('#reply-editor')?.addEventListener('input', event => onEdit(r.id, event.target.value));
   $('#generate-button')?.addEventListener('click', () => generate(r.id));
@@ -129,7 +223,7 @@ function renderDetail() {
 }
 function onEdit(id, text) {
   state.drafts[id] = { text }; state.edits.set(id, (state.edits.get(id) || 0) + 1);
-  if (state.selected === id) { $('#char-count').textContent = text.length; $('#draft-status').textContent = '저장 중…'; $('#prepare-publish').disabled = text.trim().length < 5 || !reviewConnected(state.reviews.find(r => r.id === id)) || state.publishing || state.generating.has(id); }
+  if (state.selected === id) { $('#char-count').textContent = text.length; $('#draft-status').textContent = '저장 중…'; $('#prepare-publish').disabled = text.trim().length < 5 || text.length > replyLimit(current()) || current()?.replyAllowed === false || !reviewConnected(state.reviews.find(r => r.id === id)) || state.publishing || state.generating.has(id); }
   clearTimeout(state.saveTimers.get(id)); state.saveTimers.set(id, setTimeout(() => saveDraft(id).catch(() => {}), 450)); renderStats(); renderList();
 }
 async function saveDraft(id) {
@@ -167,25 +261,26 @@ function applyReviewUpdate(review) {
   }
 }
 async function refreshReviews() {
-  if (state.publishing || state.syncing || state.refreshingReviews) return;
+  if (state.publishing || state.refreshingReviews) return;
   state.refreshingReviews = true;
   try {
     const revision = reviewRevision;
     const result = await api('/api/reviews');
-    if (state.publishing || state.syncing || revision !== reviewRevision) return;
+    if (state.publishing || revision !== reviewRevision) return;
     const detailKey = () => JSON.stringify(current());
     const selectedBefore = detailKey(), oldIds = new Set(state.reviews.map(r => r.id));
     const list = $('#review-list'), top = list.getBoundingClientRect().top;
     const anchor = [...list.querySelectorAll('[data-review]')].find(card => card.getBoundingClientRect().bottom > top);
     const anchorId = anchor?.dataset.review, anchorTop = anchor?.getBoundingClientRect().top;
-    const previous = JSON.stringify([state.reviews, state.lastSync]);
+    const previous = JSON.stringify([state.reviews, state.lastSync, state.sync, state.syncs, state.reviewPeriod]);
     state.reviews = result.reviews; state.lastSync = result.lastSync; state.sync = result.sync; state.syncs = result.syncs || {};
+    if (result.reviewPeriod) state.reviewPeriod = result.reviewPeriod;
     if (result.autoSync) { state.autoSync = result.autoSync; renderAutoSync(); }
     // Preserve local edits while accepting confirmed replies from another tab.
     state.drafts = { ...result.drafts, ...state.drafts };
     for (const r of state.reviews) if (r.hasReply) applyReviewUpdate(r);
     if (!current()) state.selected = filtered()[0]?.id || null;
-    if (previous !== JSON.stringify([state.reviews, state.lastSync])) {
+    if (previous !== JSON.stringify([state.reviews, state.lastSync, state.sync, state.syncs, state.reviewPeriod])) {
       renderStats(); renderList();
       const newAnchor = [...list.querySelectorAll('[data-review]')].find(card => card.dataset.review === anchorId);
       if (newAnchor && anchorTop !== undefined) list.scrollTop += newAnchor.getBoundingClientRect().top - anchorTop;
@@ -265,19 +360,22 @@ async function refreshStatus() {
     state.platforms = status.platforms || { naver: { connected: status.connected }, coupang: { connected: false } };
     state.coupangAutoLogin = state.platforms.coupang?.autoLogin || {};
     state.ablyAutoLogin = state.platforms.ably?.autoLogin || {};
+    state.deliveryAutoLogin = status.deliveryAutoLogin || {};
     renderConnections();
     $('#sidebar-connection').textContent = status.connected ? (state.autoLogin.enabled ? '연결됨 · 자동 로그인 켜짐' : '연결됨') : state.autoLogin.phase === 'reconnecting' ? '다시 로그인하는 중…' : '연결 확인이 필요해요'; $('#connection-dot').classList.toggle('connected', status.connected);
     $('#connection-message').textContent = status.networkError ? '네이버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요. 초안은 보관됩니다.' : authMessage();
     $('#auth-state').textContent = authMessage(); $('#auth-open').classList.toggle('connected', Boolean(state.autoLogin.enabled));
-    if ($('#prepare-publish')) $('#prepare-publish').disabled = !reviewConnected(current()) || (state.drafts[state.selected]?.text || '').trim().length < 5 || state.publishing || state.generating.has(state.selected);
+    if ($('#prepare-publish')) $('#prepare-publish').disabled = !reviewConnected(current()) || current()?.replyAllowed === false || (state.drafts[state.selected]?.text || '').length > replyLimit(current()) || (state.drafts[state.selected]?.text || '').trim().length < 5 || state.publishing || state.generating.has(state.selected);
     renderAIStatus();
     await refreshReviews();
   } catch { for (const id of ['sidebar-connection', 'coupang-sidebar-connection', 'ably-sidebar-connection', ...Object.keys(deliveryPlatforms).map(p => p + '-sidebar-connection')]) $(`#${id}`).textContent = '앱 서버 연결 끊김'; state.connected = false; if ($('#prepare-publish')) $('#prepare-publish').disabled = true; }
 }
 function renderConnections() {
+  if ($('#delivery-settings-dialog').open) renderDeliverySettings();
   for (const [platform, config] of Object.entries(deliveryPlatforms)) {
     const status = state.platforms[platform] || {}, connected = Boolean(status.connected);
-    document.getElementById(platform + '-sidebar-connection').textContent = connected ? '연결됨 · 답글 가능' : '로그인 확인 필요';
+    const auth = state.deliveryAutoLogin[config.provider] || {};
+    document.getElementById(platform + '-sidebar-connection').textContent = connected ? (auth.enabled ? '연결됨 · 자동 로그인 켜짐' : '연결됨 · 답글 가능') : auth.phase === 'reconnecting' ? '자동 로그인 중…' : auth.phase === 'needs_verification' ? '추가 인증 필요' : '로그인 확인 필요';
     document.getElementById(platform + '-connection-dot').classList.toggle('connected', connected);
   }
   const delivery = deliveryPlatforms[state.platform];
@@ -289,7 +387,7 @@ function renderConnections() {
   $('#coupang-connection-banner').hidden = coupang || state.platform !== 'coupang';
   $('#coupang-sidebar-connection').textContent = coupang ? (auth.enabled ? '연결됨 · 자동 로그인 켜짐' : '연결됨 · 조회 전용') : auth.phase === 'reconnecting' ? '다시 로그인하는 중…' : '연결 확인 필요 · 조회 전용';
   $('#coupang-connection-dot').classList.toggle('connected', coupang);
-  $('#coupang-open').textContent = coupang ? '쿠팡윙 열기 ↗' : '쿠팡윙 연결 ↗';
+  $('#coupang-open').textContent = '판매자센터 열기 ↗';
   $('#coupang-connection-message').textContent = coupangAuthMessage();
   $('#coupang-auth-state').textContent = coupangAuthMessage();
   $('#coupang-auth-open').classList.toggle('connected', Boolean(auth.enabled));
@@ -300,7 +398,7 @@ function renderConnections() {
   $('#ably-auth-state').textContent = ablyAuthMessage();
   $('#ably-auth-open').classList.toggle('connected', Boolean(ablyAuth.enabled));
   $('#ably-connection-dot').classList.toggle('connected', ably);
-  $('#ably-open').textContent = ably ? '에이블리 열기 ↗' : '에이블리 연결 ↗';
+  $('#ably-open').textContent = '판매자센터 열기 ↗';
 }
 function coupangAuthMessage() {
   const auth = state.coupangAutoLogin || {};
@@ -317,7 +415,7 @@ function coupangAuthMessage() {
 async function openCoupangAuth() {
   await refreshStatus(); const auth = state.coupangAutoLogin || {};
   $('#coupang-auth-enabled').checked = auth.configured ? Boolean(auth.enabled) : true;
-  for (const field of ['username', 'password']) { const input = $(`#coupang-auth-${field}`); input.value = ''; input.placeholder = auth.configured ? '저장됨 · 변경할 때만 입력' : '처음 연결할 때 입력'; }
+  for (const field of ['username', 'password']) { const input = $(`#coupang-auth-${field}`); input.value = ''; input.placeholder = auth.configured ? (field === 'username' ? '저장된 아이디 사용 · 계정 변경 시 입력' : '변경한 새 비밀번호 입력 · 비우면 유지') : '처음 연결할 때 입력'; }
   $('#coupang-auth-forget').disabled = !auth.configured; $('#coupang-auth-message').textContent = ''; $('#coupang-auth-dialog').showModal();
 }
 $('#coupang-auth-open').addEventListener('click', openCoupangAuth);
@@ -350,7 +448,7 @@ function ablyAuthMessage() {
 async function openAblyAuth() {
   await refreshStatus(); const auth = state.ablyAutoLogin || {};
   $('#ably-auth-enabled').checked = auth.configured ? Boolean(auth.enabled) : true;
-  for (const field of ['username', 'password']) { const input = $(`#ably-auth-${field}`); input.value = ''; input.placeholder = auth.configured ? '저장됨 · 변경할 때만 입력' : '처음 연결할 때 입력'; }
+  for (const field of ['username', 'password']) { const input = $(`#ably-auth-${field}`); input.value = ''; input.placeholder = auth.configured ? (field === 'username' ? '저장된 아이디 사용 · 계정 변경 시 입력' : '변경한 새 비밀번호 입력 · 비우면 유지') : '처음 연결할 때 입력'; }
   $('#ably-auth-forget').disabled = !auth.configured; $('#ably-auth-message').textContent = ''; $('#ably-auth-dialog').showModal();
 }
 $('#ably-auth-open').addEventListener('click', openAblyAuth);
@@ -384,8 +482,8 @@ async function openAuth() {
   await refreshStatus(); const a = state.autoLogin;
   $('#auth-enabled').checked = a.configured ? Boolean(a.enabled) : true; $('#auth-method').value = a.method || 'naver';
   $('#auth-username').value = ''; $('#auth-password').value = '';
-  $('#auth-username').placeholder = a.configured ? '저장됨 · 변경할 때만 입력' : '처음 연결할 때 입력';
-  $('#auth-password').placeholder = a.configured ? '저장됨 · 변경할 때만 입력' : '처음 연결할 때 입력';
+  $('#auth-username').placeholder = a.configured ? '저장된 아이디 사용 · 계정 변경 시 입력' : '처음 연결할 때 입력';
+  $('#auth-password').placeholder = a.configured ? '변경한 새 비밀번호 입력 · 비우면 유지' : '처음 연결할 때 입력';
   $('#auth-forget').disabled = !a.configured; $('#auth-message').textContent = ''; $('#auth-dialog').showModal();
 }
 $('#auth-form').addEventListener('submit', async event => {
@@ -418,25 +516,32 @@ async function openBrowser(platform = 'naver') {
 }
 async function sync() {
   if (state.syncing || state.publishing) return;
-  const platform = state.platform, period = $('#period').value;
-  state.syncing = true; $('#sync-button').disabled = true; $('#sync-button').classList.add('busy'); $('#sync-button').lastElementChild.textContent = '리뷰 가져오는 중';
+  const period = $('#period').value;
+  state.syncing = true; state.reviewPeriod = period; state.syncRequest = { period, baselines: Object.fromEntries(platforms.map(p => [p, syncInfo(p)?.lastSync])) }; state.syncErrors = {}; reviewRevision++; renderStats();
+  $('#sync-button').disabled = true; $('#sync-button').classList.add('busy'); $('#sync-button').lastElementChild.textContent = '리뷰 가져오는 중';
   try {
     await Promise.all([...state.saveTimers.keys()].map(id => state.reviews.find(r => r.id === id)?.hasReply ? Promise.resolve() : saveDraft(id)));
-    const result = await api('/api/sync', { period, platform }); Object.assign(state, result);
+    const result = await api('/api/sync', { period, platform: 'all' });
+    Object.assign(state, result, { drafts: { ...result.drafts, ...state.drafts } }); reviewRevision++;
+    for (const warning of result.warnings || []) state.syncErrors[warning.platform] = { message: warning.message, lastSync: syncInfo(warning.platform)?.lastSync };
+    for (const review of state.reviews) if (review.hasReply) applyReviewUpdate(review);
     const rows = filtered(); state.selected = rows.some(r => r.id === state.selected) ? state.selected : rows[0]?.id || null;
     renderStats(); renderList(); renderDetail(); await refreshStatus();
-    toast(`${platformLabel(platform)} 리뷰를 새로고침했습니다. 총 ${state.reviews.filter(r => platformOf(r) === platform).length}개입니다.`);
-  } catch (e) { toast(e.message, true); await refreshStatus(); }
-  finally { state.syncing = false; $('#sync-button').disabled = false; $('#sync-button').classList.remove('busy'); $('#sync-button').lastElementChild.textContent = '리뷰 새로고침'; }
+    toast(result.warnings?.length ? `일부 스토어 조회 실패: ${result.warnings.map(w => platformLabel(w.platform)).join(', ')}. 나머지 숫자는 선택한 기간으로 갱신했습니다.` : `전체 스토어의 ${periodLabels[period]} 리뷰 수를 갱신했습니다.`, Boolean(result.warnings?.length));
+  } catch (e) { for (const platform of platforms) state.syncErrors[platform] = { message: e.message, lastSync: syncInfo(platform)?.lastSync }; toast(e.message, true); await refreshStatus(); }
+  finally { state.syncing = false; state.syncRequest = null; renderStats(); $('#sync-button').disabled = false; $('#sync-button').classList.remove('busy'); $('#sync-button').lastElementChild.textContent = '전체 스토어 새로고침'; }
 }
 function openSettings() {
-  $('#setting-brand').value = state.settings.brand || '티웨스트'; $('#setting-tone').value = state.settings.tone || '따뜻하고 정중하게'; $('#setting-guidance').value = state.settings.guidance || ''; $('#setting-model').value = state.settings.model || 'gpt-5-mini';
+  state.settingsPlatform = deliveryPlatforms[state.platform] ? state.platform : undefined;
+  const preferences = storePreferences(state.platform); $('#setting-brand').disabled = Boolean(state.settingsPlatform);
+  $('#settings-scope').textContent = state.settingsPlatform ? platformLabel(state.settingsPlatform) + '의 말투와 운영 지침을 별도로 저장합니다.' : '네이버 브랜드 설정입니다. API 키와 모델은 모든 매장에서 함께 사용합니다.';
+  $('#setting-brand').value = preferences.brand || '티웨스트'; $('#setting-tone').value = preferences.tone || '따뜻하고 정중하게'; $('#setting-guidance').value = preferences.guidance || ''; $('#setting-model').value = state.settings.model || 'gpt-5-mini';
   $('#setting-key').value = ''; $('#setting-key').placeholder = state.aiConfigured ? '연결됨 · 변경하려면 새 키 입력' : 'sk-…'; renderAIStatus(); $('#settings-message').textContent = ''; $('#settings-dialog').showModal();
 }
 $('#settings-form').addEventListener('submit', async event => {
   event.preventDefault(); if (state.savingSettings) return; state.savingSettings = true; const button = event.submitter; button.disabled = true; renderAIStatus();
   try {
-    const result = await api('/api/settings', { brand: $('#setting-brand').value, tone: $('#setting-tone').value, guidance: $('#setting-guidance').value, model: $('#setting-model').value, apiKey: $('#setting-key').value });
+    const result = await api('/api/settings', { platform: state.settingsPlatform, brand: $('#setting-brand').value, tone: $('#setting-tone').value, guidance: $('#setting-guidance').value, model: $('#setting-model').value, apiKey: $('#setting-key').value });
     $('#setting-key').value = ''; state.settings = result.settings; state.aiConfigured = result.aiConfigured; state.aiKey = result.aiKey || {}; $('#brand-name').textContent = state.settings.brand; renderAIStatus(); renderDetail(); $('#settings-dialog').close(); toast(state.aiKey.saved ? '설정을 저장했습니다. GPT 키는 다음 실행에도 자동으로 연결됩니다.' : '설정을 저장했습니다.');
   } catch (e) { $('#settings-message').textContent = e.message; } finally { state.savingSettings = false; button.disabled = false; renderAIStatus(); }
 });
@@ -462,6 +567,7 @@ $('#publish-dialog').addEventListener('close', () => { if (!state.publishing) st
 $('#search').addEventListener('input', event => { state.query = event.target.value; renderList(); });
 $('#rating-filter').addEventListener('change', event => { state.rating = event.target.value; renderList(); });
 $('#sync-button').addEventListener('click', sync); $('#connect-button').addEventListener('click', openBrowser);
+$('#period').addEventListener('change', sync);
 $('#auto-sync-enabled').addEventListener('change', saveAutoSync); $('#auto-sync-interval').addEventListener('change', saveAutoSync);
 for (const id of ['coupang-open', 'coupang-connect-button']) $(`#${id}`).addEventListener('click', () => openBrowser('coupang'));
 for (const id of ['ably-open', 'ably-connect-button']) $(`#${id}`).addEventListener('click', () => openBrowser('ably'));

@@ -1,3 +1,4 @@
+import { emptyDeliveryConnectors } from './delivery-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
@@ -57,7 +58,7 @@ test('HTTP Ably sync preserves Naver/Coupang and drafts; read-only endpoints and
   const coupangConnector = { status: async () => ({ connected: true }), sync: async () => ({ reviews: [coupang], total: 1 }) };
   const ablyConnector = { status: async () => ({ connected: !fail }), open: async () => { opened++; return { connected: true }; }, sync: async () => { if (fail) throw new AppError('로그인 필요', 409, 'ABLY_LOGIN_REQUIRED'); return { reviews: [ably], total: 1 }; } };
   const port = 14322, base = `http://127.0.0.1:${port}`;
-  const { server, store, csrf, ablyService } = await createApp({ directory, connector, coupangConnector, ablyConnector, ai: { configured: false, generate: forbidden }, port, maintenanceInterval: 0 });
+  const { server, store, csrf, ablyService } = await createApp({ deliveryConnectors: emptyDeliveryConnectors(), directory, connector, coupangConnector, ablyConnector, ai: { configured: false, generate: forbidden }, port, maintenanceInterval: 0 });
   server.listen(port, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await cleanupTestDirectory(directory); });
   const post = (route, data = {}) => fetch(base + route, { method: 'POST', headers: { Origin: base, 'X-Review-Token': csrf, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });

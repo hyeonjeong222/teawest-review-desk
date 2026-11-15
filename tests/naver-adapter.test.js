@@ -3,6 +3,24 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { NaverConnector, dismissReplySuccess } from '../src/naver.js';
 
+test('shared browser attaches once for simultaneous store checks and recovers after failure or disconnect', async t => {
+  const connector = new NaverConnector('unused-test-profile');
+  let complete, fail, connected = true;
+  const browser = { isConnected: () => connected };
+  const attach = t.mock.method(chromium, 'connectOverCDP', () => new Promise((resolve, reject) => { complete = resolve; fail = reject; }));
+  const first = Array.from({ length: 7 }, () => connector.connect());
+  assert.equal(attach.mock.callCount(), 1);
+  fail(new Error('Temporary browser interruption'));
+  assert.ok((await Promise.allSettled(first)).every(result => result.status === 'rejected' && result.reason.code === 'BROWSER_REQUIRED'));
+  const retry = Array.from({ length: 7 }, () => connector.connect());
+  assert.equal(attach.mock.callCount(), 2); complete(browser);
+  assert.ok((await Promise.all(retry)).every(result => result === browser));
+  assert.equal(await connector.connect(), browser); assert.equal(attach.mock.callCount(), 2);
+  connected = false;
+  const reopened = connector.connect(); assert.equal(attach.mock.callCount(), 3);
+  connected = true; complete(browser); assert.equal(await reopened, browser);
+});
+
 test('Naver sync distinguishes a confirmed empty result from an unreadable review count', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(); await page.setContent(fixture);

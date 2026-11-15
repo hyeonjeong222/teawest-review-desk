@@ -1,6 +1,133 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { once } from 'node:events';
+
+// UI fixtures own their static server and never depend on a running seller connection.
+let uiServer, appUrl;
+before(async () => {
+  uiServer = http.createServer(async (req, res) => {
+    const files = { '/': 'index.html', '/app.js': 'app.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
+    const name = files[new URL(req.url, 'http://localhost').pathname];
+    if (!name) { res.writeHead(404).end(); return; }
+    const content = await readFile(new URL(`../public/${name}`, import.meta.url));
+    res.writeHead(200, { 'Content-Type': name.endsWith('.js') ? 'text/javascript; charset=utf-8' : name.endsWith('.css') ? 'text/css; charset=utf-8' : name.endsWith('.svg') ? 'image/svg+xml' : 'text/html; charset=utf-8' }); res.end(content);
+  });
+  uiServer.listen(0, '127.0.0.1'); await once(uiServer, 'listening'); appUrl = `http://127.0.0.1:${uiServer.address().port}`;
+});
+after(async () => { uiServer.closeAllConnections(); await new Promise(resolve => uiServer.close(resolve)); });
+
+test('one shared period refreshes every top store count, survives switching tabs, and never labels stale results as current', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), requests = [], errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const channels = ['naver','coupang','ably','baemin-teawest','baemin-besti','coupangeats-teawest','coupangeats-besti'];
+  const rows = channels.flatMap(platform => ['2026.11.10','2026.06.10','2026.01.10'].map((date,i) => ({ id: `${platform}-${i}`, platform, product: '상품', content: '기간별 후기', author: '고객', rating: 5, date, hasReply: false })));
+  const metadata = (period, sequence) => Object.fromEntries(channels.map(p => [p,{period:p.startsWith('baemin-')&&period==='1y'?'6m':period,from:period==='1m'?'2026-10-16':'2025-11-16',to:'2026-11-15',lastSync:sequence}]));
+  let data = { reviews: rows, drafts: {}, reviewPeriod:'1y', syncs: metadata('1y','before') }, finish, partialFailure = false;
+  const hold = new Promise(resolve => { finish = resolve; });
+  await page.route('**/api/**', async route => {
+    const req=route.request(), url=new URL(req.url()); let result;
+    if(url.pathname==='/api/session') result={csrf:'test',settings:{brand:'테스트'},aiConfigured:false};
+    else if(url.pathname==='/api/status') result={connected:true,aiConfigured:false};
+    else if(url.pathname==='/api/reviews') result=data;
+    else if(url.pathname==='/api/sync') {
+      const query=req.postDataJSON(); requests.push(query); assert.equal(query.platform,'all');
+      if(requests.length===1) await hold;
+      const old=data, reviewPeriod=query.period;
+      const reviews=rows.filter(r=>reviewPeriod==='1m'?r.date>'2026.10.15':r.platform.startsWith('baemin-')?r.date>'2026.05.15':true);
+      data={...data,reviews,reviewPeriod,syncs:metadata(reviewPeriod,String(requests.length))};
+      const warnings=[];
+      if(partialFailure){const p='coupangeats-besti';data.syncs[p]=old.syncs[p];data.reviews=[...data.reviews.filter(r=>r.platform!==p),...old.reviews.filter(r=>r.platform===p)];warnings.push({platform:p,message:'테스트 조회 실패'});}
+      result={...data,warnings};
+    } else assert.fail(`Unexpected request: ${url.pathname}`);
+    await route.fulfill({contentType:'application/json',body:JSON.stringify(result)});
+  });
+  await page.goto(appUrl); await page.waitForFunction(()=>document.querySelector('#period').value==='1y');
+  await page.locator('#period').selectOption('1m');
+  await page.waitForFunction(()=>document.querySelector('#period').disabled);
+  for(const p of channels) assert.equal(await page.locator(`#platform-${p}`).textContent(),'조회 중');
+  // One provider can finish while the others are still fetching.
+  data={...data,reviews:data.reviews.filter(r=>r.platform!=='baemin-teawest'||r.date>'2026.10.15'),syncs:{...data.syncs,'baemin-teawest':metadata('1m','partial')['baemin-teawest']}};
+  await page.waitForFunction(()=>document.querySelector('#platform-baemin-teawest').textContent==='1',{}, {timeout:9000});
+  assert.equal(await page.locator('#platform-coupangeats-teawest').textContent(),'조회 중');
+  finish(); await page.waitForFunction(()=>!document.querySelector('#period').disabled);
+  for(const p of channels) assert.equal(await page.locator(`#platform-${p}`).textContent(),'1');
+  await page.locator('.platform-tabs [data-platform="coupangeats-teawest"]').click();
+  assert.equal(await page.locator('#period').inputValue(),'1m'); assert.equal(await page.locator('#stat-total').textContent(),'1');
+  await page.locator('#period').selectOption('1y'); await page.waitForFunction(()=>!document.querySelector('#period').disabled);
+  assert.equal(await page.locator('#platform-coupangeats-teawest').textContent(),'3');
+  assert.equal(await page.locator('#platform-baemin-teawest').textContent(),'2');
+  assert.match(await page.locator('.platform-tabs [data-platform="baemin-teawest"]').textContent(),/최대 6개월/);
+  await page.locator('.platform-tabs [data-platform="baemin-besti"]').click(); assert.equal(await page.locator('#period').inputValue(),'1y');
+  assert.equal(await page.locator('#stat-total').textContent(),'2');
+  partialFailure=true;
+  await page.locator('#period').selectOption('1m'); await page.waitForFunction(()=>!document.querySelector('#period').disabled);
+  assert.equal(await page.locator('#platform-baemin-besti').textContent(),'1'); assert.equal(await page.locator('#platform-coupangeats-besti').textContent(),'조회 실패');
+  await page.locator('.platform-tabs [data-platform="coupangeats-besti"]').click(); assert.match(await page.locator('#period-status').textContent(),/조회 실패.*최근 1년/);
+  await page.reload(); await page.waitForFunction(()=>document.querySelector('#period').value==='1m');
+  assert.equal(await page.locator('#platform-coupangeats-besti').textContent(),'조회 필요');
+  assert.deepEqual(requests.map(r=>r.period),['1m','1y','1m']); assert.deepEqual(errors,[]);
+});
+
+test('connection settings align across five providers and support password-only updates and delivery re-login', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const changes = [], opened = [], errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const auth = method => ({ configured: true, enabled: true, method, phase: 'connected' });
+  const deliveryAuth = { baemin: { configured: false, enabled: false }, coupangeats: { configured: false, enabled: false } };
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()); let result;
+    if (url.pathname === '/api/session') result = { csrf: 'test', settings: { brand: '테스트' }, aiConfigured: false };
+    else if (url.pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (url.pathname === '/api/status') result = { connected: true, autoLogin: auth('naver'), deliveryAutoLogin: deliveryAuth, platforms: { naver: { connected: true }, coupang: { connected: true, autoLogin: auth('coupang') }, ably: { connected: true, autoLogin: auth('ably') } } };
+    else if (/^\/api\/auth(?:\/coupang|\/ably)?\/settings$/.test(url.pathname)) { changes.push({ route: url.pathname, ...req.postDataJSON() }); result = auth(req.postDataJSON().method); }
+    else if (url.pathname === '/api/browser/open') { opened.push(req.postDataJSON().platform); result = { connected: false }; }
+    else if (/^\/api\/auth\/(baemin|coupangeats)\/(settings|open|forget)$/.test(url.pathname)) {
+      const [, , , provider, action] = url.pathname.split('/');
+      if (action === 'settings') { changes.push({ route: url.pathname, ...req.postDataJSON() }); deliveryAuth[provider] = { ...auth(provider), phase: 'needs_verification', blocked: 'verification' }; }
+      if (action === 'open') { opened.push(provider); deliveryAuth[provider] = auth(provider); }
+      if (action === 'forget') deliveryAuth[provider] = { configured: false, enabled: false };
+      result = deliveryAuth[provider];
+    }
+    else assert.fail(`Unexpected request ${url.pathname}`);
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl); await page.locator('#auth-open').waitFor();
+  const boxes = await page.locator('.connection-setting-button').evaluateAll(buttons => buttons.map(b => { const r = b.getBoundingClientRect(); return { top: r.top, width: r.width, height: r.height }; }));
+  assert.equal(boxes.length, 5); for (const box of boxes) { assert.equal(box.top, boxes[0].top); assert.ok(Math.abs(box.width - boxes[0].width) < 1); assert.equal(box.height, boxes[0].height); }
+  for (const prefix of ['auth', 'coupang-auth', 'ably-auth']) {
+    await page.locator(`#${prefix}-open`).click(); await page.locator(`#${prefix}-dialog[open]`).waitFor();
+    assert.equal(await page.locator(`#${prefix}-username`).inputValue(), ''); assert.equal(await page.locator(`#${prefix}-password`).inputValue(), '');
+    await page.locator(`#${prefix}-password`).fill('synthetic-updated-password');
+    await page.locator(`#${prefix}-form button[type=submit]`).click(); await page.locator(`#${prefix}-dialog[open]`).waitFor({ state: 'hidden' });
+    assert.equal(changes.at(-1).username, ''); assert.equal(changes.at(-1).password, 'synthetic-updated-password');
+    assert.equal(await page.locator(`#${prefix}-password`).inputValue(), '');
+  }
+  assert.deepEqual(changes.map(c => c.route), ['/api/auth/settings', '/api/auth/coupang/settings', '/api/auth/ably/settings']);
+  for (const [button, provider] of [['baemin-auth-open', 'baemin'], ['eats-auth-open', 'coupangeats']]) {
+    await page.locator(`#${button}`).click(); await page.locator('#delivery-settings-dialog[open]').waitFor();
+    assert.match(await page.locator('.password-update-guide').innerText(), /새 비밀번호/);
+    await page.locator('#delivery-settings-store').selectOption(`${provider}-besti`);
+    await page.locator('#delivery-auth-username').fill(`${provider}-synthetic-account`); await page.locator('#delivery-auth-password').fill('synthetic-first-password');
+    await page.locator('#delivery-auth-save').click(); await page.locator('#delivery-settings-dialog[open]').waitFor({ state: 'hidden' }); await page.waitForFunction(() => !document.querySelector('#delivery-auth-save').disabled);
+    assert.equal(changes.at(-1).enabled, true); assert.equal(changes.at(-1).method, provider); assert.equal(await page.locator('#delivery-auth-password').inputValue(), '');
+    await page.locator(`#${button}`).click(); await page.locator('#delivery-settings-dialog[open]').waitFor();
+    assert.match(await page.locator('#delivery-settings-status').innerText(), /추가 인증/); assert.equal(await page.locator('#delivery-auth-username').inputValue(), '');
+    await page.locator('#delivery-settings-browser').click(); await page.waitForFunction(() => !document.querySelector('#delivery-settings-browser').disabled);
+    assert.equal(opened.at(-1), provider);
+    await page.locator('#delivery-auth-password').fill('synthetic-next-password'); await page.locator('#delivery-auth-save').click(); await page.locator('#delivery-settings-dialog[open]').waitFor({ state: 'hidden' }); await page.waitForFunction(() => !document.querySelector('#delivery-auth-save').disabled);
+    assert.equal(changes.at(-1).username, ''); assert.equal(changes.at(-1).password, 'synthetic-next-password');
+    await page.reload(); await page.locator(`#${button}`).click(); await page.locator('#delivery-settings-dialog[open]').waitFor(); assert.equal(await page.locator('#delivery-auth-password').inputValue(), ''); assert.equal(await page.locator('#delivery-auth-enabled').isChecked(), true);
+    await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.locator('#delivery-auth-forget').click(); await page.waitForFunction(() => document.querySelector('#delivery-auth-forget').disabled); assert.equal(await page.locator('#delivery-auth-enabled').isChecked(), false);
+    await page.locator('[data-close="delivery-settings-dialog"]').click();
+  }
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true); assert.deepEqual(errors, []);
+});
 
 test('browser: background reviews update without reload, preserve active edits and selection, and persist auto-sync controls', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
@@ -14,13 +141,13 @@ test('browser: background reviews update without reload, preserve active edits a
     const req = route.request(), url = new URL(req.url()); let result;
     if (url.pathname === '/api/session') result = { csrf: 'test', settings: { brand: '테스트' }, aiConfigured: true, autoSync };
     else if (url.pathname === '/api/status') result = { connected: true, aiConfigured: true };
-    else if (url.pathname === '/api/reviews') { polls++; result = { reviews, drafts, autoSync }; }
+    else if (url.pathname === '/api/reviews') { polls++; result = { reviews, drafts, autoSync, syncs: Object.fromEntries(['naver','coupang','ably'].map(p => [p,{period:'3m'}])) }; }
     else if (url.pathname.endsWith('/draft')) { drafts[req.url().split('/').at(-2)] = { text: req.postDataJSON().text }; result = { saved: true }; }
     else if (url.pathname === '/api/auto-sync/settings') { const data = req.postDataJSON(); settings.push(data); autoSync = { ...autoSync, ...data }; result = autoSync; }
     else assert.fail(`Unexpected request; no generation, sync, or publish allowed: ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#reply-editor').waitFor();
+  await page.goto(appUrl); await page.locator('#reply-editor').waitFor();
   await page.locator('.platform-tabs [data-platform="naver"]').click();
   await page.locator('#reply-editor').fill('자동으로 새 리뷰가 와도 유지할 초안입니다.');
   await page.waitForFunction(() => document.querySelector('#draft-status')?.textContent === '초안 저장됨');
@@ -63,7 +190,7 @@ test('browser: Ably tab shows satisfaction without stars, filters independently,
     else assert.fail(`Unexpected route ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#reply-editor').waitFor();
+  await page.goto(appUrl); await page.locator('#reply-editor').waitFor();
   assert.equal(await page.locator('#stat-rating').innerText(), '5.0');
   await page.locator('#connect-ably-sidebar').click();
   assert.equal(await page.locator('#platform-heading').innerText(), '에이블리 리뷰'); assert.equal(await page.locator('.review-card').count(), 2);
@@ -98,7 +225,7 @@ test('browser: Ably automatic login saves once, clears secrets, supports MFA rec
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#ably-auth-open').click(); await page.locator('#ably-auth-dialog[open]').waitFor();
+  await page.goto(appUrl); await page.locator('#ably-auth-open').click(); await page.locator('#ably-auth-dialog[open]').waitFor();
   await page.locator('#ably-auth-username').fill('synthetic-user'); await page.locator('#ably-auth-password').fill('synthetic-password');
   await page.locator('#ably-auth-form button[type=submit]').click(); await page.locator('#ably-auth-dialog[open]').waitFor({ state: 'hidden' });
   assert.deepEqual(saved, { enabled: true, method: 'ably', username: 'synthetic-user', password: 'synthetic-password' });
@@ -131,7 +258,7 @@ test('browser: Coupang automatic login saves once, clears secrets, supports MFA 
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#coupang-auth-open').click(); await page.locator('#coupang-auth-dialog[open]').waitFor();
+  await page.goto(appUrl); await page.locator('#coupang-auth-open').click(); await page.locator('#coupang-auth-dialog[open]').waitFor();
   await page.locator('#coupang-auth-username').fill('synthetic-user'); await page.locator('#coupang-auth-password').fill('synthetic-password');
   await page.locator('#coupang-auth-form button[type=submit]').click(); await page.locator('#coupang-auth-dialog[open]').waitFor({ state: 'hidden' });
   assert.deepEqual(saved, { enabled: true, method: 'coupang', username: 'synthetic-user', password: 'synthetic-password' });
@@ -148,7 +275,7 @@ test('browser: Coupang automatic login saves once, clears secrets, supports MFA 
   assert.equal(await page.locator('#auth-enabled').isChecked(), true); assert.equal(await page.locator('#auth-password').inputValue(), ''); assert.deepEqual(errors, []);
 });
 
-test('browser: mixed-platform filters, read-only Coupang detail, Naver-only reply metrics and per-platform refresh', async t => {
+test('browser: mixed-platform filters, read-only Coupang detail, Naver-only reply metrics and shared-period refresh', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }); const errors = []; page.on('pageerror', e => errors.push(e.message));
   const naver = { id: '123', product: '네이버 상품', content: '맛있어요', rating: 5, author: 'n***', date: '2026.11.15', hasReply: false, productUrl: 'https://smartstore.naver.com/main/products/123' };
@@ -164,13 +291,13 @@ test('browser: mixed-platform filters, read-only Coupang detail, Naver-only repl
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#reply-editor').waitFor();
+  await page.goto(appUrl); await page.locator('#reply-editor').waitFor();
   assert.equal(await page.locator('#stat-total').innerText(), '2'); assert.equal(await page.locator('#stat-rate').innerText(), '50'); assert.equal(await page.locator('#stat-pending').innerText(), '1');
   await page.locator('.filter-tabs [data-filter="pending"]').click(); assert.equal(await page.locator('.review-card').count(), 1);
   await page.locator('#connect-coupang-sidebar').click();
   assert.deepEqual(opens, []); assert.equal(await page.locator('#connect-coupang-sidebar').getAttribute('aria-pressed'), 'true');
   assert.equal(await page.locator('.platform-tabs [data-platform="coupang"]').getAttribute('aria-pressed'), 'true');
-  assert.equal(await page.locator('.review-card').count(), 1); assert.equal(await page.locator('#period').inputValue(), '3m');
+  assert.equal(await page.locator('.review-card').count(), 1); assert.equal(await page.locator('#period').inputValue(), '6m');
   assert.equal(await page.locator('#reply-editor, #generate-button, #prepare-publish, #reply-tone').count(), 0);
   assert.equal(await page.locator('.filter-tabs').isVisible(), false); assert.equal(await page.locator('#stat-rate').innerText(), '—');
   assert.equal(await page.locator('[data-reply-stat]:visible').count(), 0);
@@ -183,7 +310,7 @@ test('browser: mixed-platform filters, read-only Coupang detail, Naver-only repl
   await page.locator('#search').fill('네이버 상품'); await page.locator('#rating-filter').selectOption('5');
   await page.locator('.platform-tabs [data-platform="coupang"]').click(); assert.equal(await page.locator('.review-card').count(), 1);
   assert.equal(await page.locator('#search').inputValue(), ''); assert.equal(await page.locator('#rating-filter').inputValue(), 'all');
-  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(refreshes, [{ period: '3m', platform: 'coupang' }]);
+  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(refreshes, [{ period: '6m', platform: 'all' }]);
   await page.locator('#coupang-detail-open').click(); await page.waitForResponse(r => new URL(r.url()).pathname === '/api/status'); assert.deepEqual(opens, ['coupang']);
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.locator('.platform-tabs [data-platform="naver"]').click(); assert.equal(await page.locator('.review-card').count(), 2); assert.equal(await page.locator('#period').inputValue(), '6m');
@@ -212,7 +339,7 @@ test('browser: AI only drafts, edits survive reload, and final human click publi
     else { status = 500; result = { error: 'Unexpected mock API route' }; }
     await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('.review-card').first().waitFor();
+  await page.goto(appUrl); await page.locator('.review-card').first().waitFor();
   assert.equal(await page.locator('.original-review script').count(), 0);
   await page.locator('#generate-button').click(); await page.waitForFunction(() => document.querySelector('#reply-editor')?.value.includes('식감을 즐겨'));
   assert.equal(published.length, 0); assert.equal(tones[0], undefined);
@@ -252,7 +379,7 @@ test('browser: auto-login setup clears secrets and verification recovery never s
     else { assert.fail(`Unexpected route ${url.pathname}`); }
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#auth-open').click(); await page.locator('#auth-dialog[open]').waitFor();
+  await page.goto(appUrl); await page.locator('#auth-open').click(); await page.locator('#auth-dialog[open]').waitFor();
   await page.locator('#auth-username').fill('test-only-user'); await page.locator('#auth-password').fill('test-only-password');
   await page.locator('#auth-form button[type=submit]').click(); await page.locator('#auth-dialog[open]').waitFor({ state: 'hidden' });
   assert.equal(input.enabled, true); assert.equal(input.password, 'test-only-password'); assert.equal(await page.locator('#auth-password').inputValue(), '');
@@ -285,7 +412,7 @@ test('browser: failed publish acknowledgement is reconciled, and another tab upd
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#reply-editor').fill('내가 확인하고 등록한 답글입니다.');
+  await page.goto(appUrl); await page.locator('#reply-editor').fill('내가 확인하고 등록한 답글입니다.');
   await page.locator('#prepare-publish').click(); await page.locator('#confirm-publish').click();
   await page.locator('.posted-reply').waitFor(); assert.equal(sends, 1); assert.equal(details, 1); assert.equal(await page.locator('#stat-rate').innerText(), '50');
   await page.locator(`[data-review="${second.id}"]`).click(); await page.locator('#reply-editor').fill('계속 작성 중인 내 초안입니다.');
@@ -314,7 +441,7 @@ test('browser: saved GPT key is never rehydrated into the input and can be delet
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto('http://127.0.0.1:4317'); await page.locator('#ai-chip').click(); await page.locator('#setting-key').fill('sk-test-ui-only');
+  await page.goto(appUrl); await page.locator('#ai-chip').click(); await page.locator('#setting-key').fill('sk-test-ui-only');
   await page.locator('#settings-form button[type="submit"]').click(); await page.locator('#settings-dialog[open]').waitFor({ state: 'hidden' });
   assert.equal(receivedKey, 'sk-test-ui-only'); assert.equal(await page.locator('#setting-key').inputValue(), '');
   await page.reload(); await page.locator('#ai-chip').click(); assert.equal(await page.locator('#setting-key').inputValue(), '');

@@ -38,8 +38,13 @@ export class NaverConnector {
   }
   async connect() {
     if (this.browser?.isConnected()) return this.browser;
-    try { this.browser = await chromium.connectOverCDP(this.endpoint, { timeout: 2500 }); return this.browser; }
-    catch { throw new AppError('네이버 연결 창을 먼저 열고 로그인해 주세요.', 409, 'BROWSER_REQUIRED'); }
+    // All stores share one browser. Concurrent status/login checks must share
+    // the attachment too, or each one initializes every open store tab again.
+    if (!this.connecting) this.connecting = chromium.connectOverCDP(this.endpoint, { timeout: 15000, noDefaults: true })
+      .then(browser => { this.browser = browser; return browser; })
+      .catch(() => { throw new AppError('연결 창을 먼저 열고 로그인해 주세요.', 409, 'BROWSER_REQUIRED'); })
+      .finally(() => { this.connecting = null; });
+    return this.connecting;
   }
   async open(focus = true) {
     return this.openQueue.run(async () => {

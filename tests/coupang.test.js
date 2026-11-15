@@ -1,3 +1,4 @@
+import { emptyDeliveryConnectors } from './delivery-fixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
@@ -93,7 +94,7 @@ test('HTTP mixed sync reports partial failure, preserves cached reviews, and rej
   const connector = { status: async () => ({ connected: true }), sync: async () => ({ reviews: [naver], total: 1 }), detail: forbidden, publish: forbidden };
   const coupangConnector = { status: async () => ({ connected: !fail }), sync: async () => { if (fail) throw new AppError('로그인 필요', 409, 'COUPANG_LOGIN_REQUIRED'); return { reviews: [coupang], total: 1 }; } };
   const port = 14320, base = `http://127.0.0.1:${port}`;
-  const { server, store, csrf } = await createApp({ directory, ablyConnector: { status: async () => ({ connected: false }), sync: async () => ({ reviews: [], total: 0 }) }, connector, coupangConnector, ai: { configured: false, generate: forbidden }, port, maintenanceInterval: 0 });
+  const { server, store, csrf } = await createApp({ deliveryConnectors: emptyDeliveryConnectors(), directory, ablyConnector: { status: async () => ({ connected: false }), sync: async () => ({ reviews: [], total: 0 }) }, connector, coupangConnector, ai: { configured: false, generate: forbidden }, port, maintenanceInterval: 0 });
   server.listen(port, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await cleanupTestDirectory(directory); });
   const post = (route, data = {}) => fetch(base + route, { method: 'POST', headers: { Origin: base, 'X-Review-Token': csrf, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
