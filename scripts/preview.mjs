@@ -1,0 +1,10 @@
+import { chromium } from 'playwright-core';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9337');
+const page = browser.contexts()[0].pages().find(p => p.url().startsWith('http://127.0.0.1:4317')) || await browser.contexts()[0].newPage();
+await page.setViewportSize({ width: 1480, height: 1100 });
+await page.goto('http://127.0.0.1:4317');
+await page.locator('.review-card').first().waitFor();
+await page.bringToFront();
+await page.screenshot({ path: '.local/desktop-preview.png', fullPage: true });
+console.log(JSON.stringify({ title: await page.title(), cards: await page.locator('.review-card').count(), horizontalOverflow: await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), url: page.url() }));
+await browser.close();
