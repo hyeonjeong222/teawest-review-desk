@@ -5,6 +5,7 @@ import path from 'node:path';
 import { AppError, assertSameReview, SerialQueue } from './core.js';
 import { readRenderedRows, readReviewDetail } from './naver-dom.js';
 import { REVIEW_URL, isNaverPage, loginWithCredentials } from './naver-login.js';
+import { browserCandidates } from './browser-path.js';
 
 const periods = { '1m': '1개월', '3m': '3개월', '6m': '6개월', '1y': '1년' };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -49,7 +50,7 @@ export class NaverConnector {
   async open(focus = true) {
     return this.openQueue.run(async () => {
       try { await this.connect(); } catch {
-        const candidates = [process.env.CHROME_PATH, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].filter(Boolean);
+        const candidates = browserCandidates();
         let executable;
         for (const p of candidates) { try { await access(p); executable = p; break; } catch {} }
         if (!executable) throw new AppError('Chrome 또는 Edge를 찾지 못했습니다. CHROME_PATH를 설정해 주세요.', 503, 'BROWSER_MISSING');

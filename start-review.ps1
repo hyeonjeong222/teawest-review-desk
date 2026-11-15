@@ -11,7 +11,8 @@ if (-not $reviewReady) {
         throw 'Run npm install in this folder first.'
     }
     New-Item -ItemType Directory -Path "$reviewRoot\.local" -Force | Out-Null
-    $reviewNode = (Get-Command node -ErrorAction Stop).Source
+    $reviewNode = Join-Path $reviewRoot 'runtime\node.exe'
+    if (-not (Test-Path -LiteralPath $reviewNode)) { $reviewNode = (Get-Command node -ErrorAction Stop).Source }
     Start-Process -FilePath $reviewNode -ArgumentList @('--env-file-if-exists=.env', 'src/server.js') -WorkingDirectory $reviewRoot -WindowStyle Hidden -RedirectStandardOutput "$reviewRoot\.local\server.log" -RedirectStandardError "$reviewRoot\.local\server-error.log" | Out-Null
     for ($reviewAttempt = 0; $reviewAttempt -lt 30; $reviewAttempt++) {
         Start-Sleep -Milliseconds 200

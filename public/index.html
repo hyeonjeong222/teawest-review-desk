@@ -13,9 +13,9 @@
     <div class="workspace"><span class="store-avatar">T</span><div><strong id="brand-name">티웨스트</strong><small>MY WORKSPACE</small></div><span class="workspace-dot"></span></div>
     <div class="nav-label">리뷰 워크스페이스</div>
     <nav class="nav" aria-label="리뷰 메뉴">
-      <button class="nav-item" data-filter="pending"><span data-icon="clock"></span>답글 대기<span class="nav-count" id="nav-pending">0</span></button>
-      <button class="nav-item" data-filter="draft"><span data-icon="edit"></span>작성 중<span class="nav-count" id="nav-draft">0</span></button>
-      <button class="nav-item" data-filter="replied"><span data-icon="check-circle"></span>등록 완료<span class="nav-count" id="nav-replied">0</span></button>
+      <button class="nav-item" data-filter="pending" aria-label="답글 대기" title="답글 대기"><span data-icon="clock"></span>답글 대기<span class="nav-count" id="nav-pending">0</span></button>
+      <button class="nav-item" data-filter="draft" aria-label="작성 중" title="작성 중"><span data-icon="edit"></span>작성 중<span class="nav-count" id="nav-draft">0</span></button>
+      <button class="nav-item" data-filter="replied" aria-label="등록 완료" title="등록 완료"><span data-icon="check-circle"></span>등록 완료<span class="nav-count" id="nav-replied">0</span></button>
     </nav>
     <div class="nav-label channel-label">연결된 스토어</div>
     <button class="channel" id="connect-sidebar" data-platform="naver" aria-pressed="false" aria-label="네이버 리뷰 보기"><span class="naver-logo">N</span><span>네이버 스마트스토어<small id="sidebar-connection">연결 확인 중</small></span><span class="status-dot" id="connection-dot"></span></button>
@@ -23,7 +23,7 @@
     <button class="channel" id="connect-ably-sidebar" data-platform="ably" aria-pressed="false" aria-label="에이블리 리뷰 보기"><span class="ably-logo">A</span><span>에이블리<small id="ably-sidebar-connection">조회 전용 · 연결 확인 중</small></span><span class="status-dot" id="ably-connection-dot"></span></button>
     <div class="sidebar-bottom">
       <div class="human-note"><span data-icon="sparkles"></span><strong>마지막 한마디는 직접.</strong><p>AI의 제안에 마음을 더해<br>나만의 답글을 완성하세요.</p></div>
-      <button class="nav-item" id="settings-open"><span data-icon="settings"></span>브랜드 · GPT 설정</button>
+      <button class="nav-item" id="settings-open" aria-label="브랜드 · GPT 설정" title="브랜드 · GPT 설정"><span data-icon="settings"></span>브랜드 · GPT 설정</button>
       <div class="local-label"><span></span>이 PC에서 실행 중</div>
     </div>
   </aside>
@@ -31,8 +31,10 @@
     <header class="topbar"><div class="breadcrumb">워크스페이스<span>/</span><strong id="platform-heading">네이버 리뷰</strong></div><div class="topbar-right"><button class="ai-chip" id="ai-chip"><span data-icon="sparkles"></span><span id="ai-status">GPT 연결하기</span></button><span class="profile">T</span></div></header>
     <section class="page-heading"><div><div class="eyebrow">CUSTOMER VOICES</div><h1>리뷰 관리<span class="heading-dot">.</span></h1><p>고객의 이야기를 한눈에, 답글은 더 세심하게.</p></div><div class="sync-controls"><div class="sync-meta" id="sync-meta">네이버 리뷰를 가져와 시작하세요</div><div class="sync-row"><label class="sr-only" for="period">전체 스토어 조회 기간</label><select id="period"><option value="1m">최근 1개월</option><option value="3m" selected>최근 3개월</option><option value="6m">최근 6개월</option><option value="1y">최근 1년</option></select><button id="sync-button" class="button primary"><span data-icon="refresh"></span><span>전체 스토어 새로고침</span></button></div><p id="period-status" class="period-status" role="status" aria-live="polite"></p></div></section>
     <div class="platform-bar"><div class="platform-tabs" role="group" aria-label="스토어 선택"><button data-platform="naver" class="active">네이버 <span id="platform-naver">0</span></button><button data-platform="coupang">쿠팡 <span id="platform-coupang">0</span></button><button data-platform="ably">에이블리 <span id="platform-ably">0</span></button></div></div>
-    <section class="connection-settings" aria-label="스토어 연결 설정">
-      <div class="connection-settings-title">스토어 연결 설정 <span>로그인 정보와 비밀번호를 관리하세요</span></div>
+    <div class="workspace-tools">
+      <details id="connection-settings-panel" class="connection-settings">
+        <summary><span data-icon="settings"></span><strong>스토어 연결 설정</strong><span id="connection-summary" class="connection-summary">5개 서비스</span><span class="disclosure-arrow" aria-hidden="true">⌄</span></summary>
+        <div class="connection-settings-body"><p class="connection-settings-description">자동 로그인 설정과 비밀번호 변경을 여기서 관리하세요.</p>
       <div class="connection-settings-grid">
         <div class="connection-setting"><button id="auth-open" class="connection-setting-button" aria-label="네이버 연결 설정"><span>네이버</span><span>연결 설정 <span aria-hidden="true">⚙</span></span></button><button id="naver-open" class="connection-center-link">판매자센터 열기 ↗</button></div>
         <div class="connection-setting"><button id="coupang-auth-open" class="connection-setting-button" aria-label="쿠팡 연결 설정"><span>쿠팡</span><span>연결 설정 <span aria-hidden="true">⚙</span></span></button><button id="coupang-open" class="connection-center-link">판매자센터 열기 ↗</button></div>
@@ -40,11 +42,17 @@
         <div class="connection-setting"><button id="baemin-auth-open" class="connection-setting-button" aria-label="배달의민족 연결 설정"><span>배달의민족</span><span>연결 설정 <span aria-hidden="true">⚙</span></span></button><button data-delivery-center="baemin" class="connection-center-link">판매자센터 열기 ↗</button></div>
         <div class="connection-setting"><button id="eats-auth-open" class="connection-setting-button" aria-label="쿠팡이츠 연결 설정"><span>쿠팡이츠</span><span>연결 설정 <span aria-hidden="true">⚙</span></span></button><button data-delivery-center="coupangeats" class="connection-center-link">판매자센터 열기 ↗</button></div>
       </div>
-    </section>
+        </div>
+      </details>
+      <button id="transfer-open" class="text-button transfer-shortcut">다른 PC로 로그인 정보 옮기기 ↗</button>
+    </div>
     <section id="auto-sync-panel" class="auto-sync-panel" aria-label="리뷰 자동 가져오기" hidden>
-      <div class="auto-sync-controls"><label class="auto-sync-toggle"><input id="auto-sync-enabled" type="checkbox">새 리뷰 자동 가져오기</label><label class="auto-sync-interval">조회 주기<select id="auto-sync-interval"><option value="5">5분</option><option value="10">10분</option><option value="30">30분</option><option value="60">1시간</option></select></label><span id="auto-sync-summary"></span></div>
-      <p class="auto-sync-note">앱 서버가 실행 중일 때 연결된 스토어와 매장을 확인합니다. 스토어별 마지막 조회 기간을 유지하며, 가져온 결과는 화면에 자동 반영됩니다.</p>
-      <div id="auto-sync-platforms" class="auto-sync-platforms" role="status"></div><p id="live-update-message" class="auto-sync-note" role="status" hidden></p>
+      <div class="auto-sync-controls"><label class="auto-sync-toggle"><input id="auto-sync-enabled" type="checkbox" role="switch">새 리뷰 자동 가져오기</label><label class="auto-sync-interval"><span class="sr-only">조회 주기</span><select id="auto-sync-interval" aria-label="자동 조회 주기"><option value="5">5분마다</option><option value="10">10분마다</option><option value="30">30분마다</option><option value="60">1시간마다</option></select></label><span id="auto-sync-summary" role="status"></span></div>
+      <details id="auto-sync-details" class="auto-sync-details">
+        <summary>조회 현황 <span id="auto-sync-alert" class="attention-badge" hidden></span><span class="disclosure-arrow" aria-hidden="true">⌄</span></summary>
+        <div class="auto-sync-detail-body"><p class="auto-sync-note">앱이 실행 중일 때 선택한 조회 기간으로 새 리뷰를 확인하고 화면에 반영합니다.</p><div id="auto-sync-platforms" class="auto-sync-platforms" role="status"></div></div>
+      </details>
+      <p id="live-update-message" class="auto-sync-note" role="status" hidden></p>
     </section>
     <div id="connection-banner" class="connection-banner" hidden role="status"><span data-icon="link"></span><p id="connection-message">네이버 연결 창에서 로그인한 뒤 리뷰를 가져와 주세요.</p><button id="connect-button" class="text-button">네이버 연결 창 열기 <span>↗</span></button></div>
     <div id="coupang-connection-banner" class="connection-banner coupang-banner" hidden role="status"><span data-icon="link"></span><p id="coupang-connection-message">쿠팡윙에 로그인하면 쿠팡 리뷰도 함께 확인할 수 있습니다. 쿠팡은 조회 전용입니다.</p><button id="coupang-connect-button" class="text-button">쿠팡 연결 창 열기 <span>↗</span></button></div>
@@ -52,7 +60,7 @@
     <div id="delivery-connection-banner" class="connection-banner" hidden role="status"><p id="delivery-connection-message"></p><button id="delivery-connect-button" class="text-button">연결 창 열기 ↗</button></div>
     <section class="stats" aria-label="리뷰 현황">
       <div class="stat"><div class="stat-head">리뷰 수<span data-icon="messages"></span></div><div><strong id="stat-total">0</strong><span class="stat-unit">개</span></div><small id="stat-period">조회 기간 내 리뷰</small></div>
-      <div class="stat accent-stat" data-reply-stat><div class="stat-head">답글 대기<span class="small-dot"></span></div><div><strong id="stat-pending">0</strong><span class="stat-unit">개</span></div><small>답글을 지원하는 매장만 집계</small></div>
+      <div class="stat accent-stat" data-reply-stat><div class="stat-head">답글 대기<span class="small-dot"></span></div><div><strong id="stat-pending">0</strong><span class="stat-unit">개</span></div><small>답글 가능한 리뷰 기준</small></div>
       <div class="stat" data-reply-stat><div class="stat-head">답글 등록률<span data-icon="check-circle"></span></div><div><strong id="stat-rate">0</strong><span class="stat-unit">%</span></div><div class="progress-track"><span id="rate-bar"></span></div></div>
       <div class="stat"><div class="stat-head"><span id="stat-rating-label">평균 평점</span><span class="star-accent" id="stat-rating-icon">★</span></div><div><strong id="stat-rating">—</strong><span class="stat-unit" id="stat-rating-unit">/ 5</span></div><small id="stat-stars" class="stat-stars">☆☆☆☆☆</small></div>
     </section>
@@ -134,5 +142,28 @@
     </div><div class="dialog-footer"><span id="settings-message" role="status"></span><button class="button primary" type="submit">설정 저장</button></div>
   </form></dialog>
   <dialog id="publish-dialog" class="publish-dialog"><div class="dialog-header"><div><div class="eyebrow">READY TO REPLY</div><h2>등록할 답글을 확인해 주세요</h2></div><button class="icon-button" data-close="publish-dialog" aria-label="등록 확인 닫기"><span data-icon="x"></span></button></div><div class="dialog-body"><div class="confirm-product" id="confirm-product"></div><div class="confirm-original" id="confirm-original"></div><div class="confirm-label">내가 작성한 답글</div><div id="confirm-text" class="confirm-text"></div><p class="settings-note" id="publish-notice">아래 버튼을 누르면 이 답글이 해당 매장 리뷰에 등록됩니다.</p></div><div class="dialog-footer"><button class="button secondary" data-close="publish-dialog">더 수정하기</button><button class="button primary" id="confirm-publish"><span data-icon="send"></span>네이버에 등록</button></div></dialog>
+  <dialog id="transfer-dialog" class="settings-dialog" aria-labelledby="transfer-title">
+    <div class="dialog-header"><div><div class="eyebrow">MOVE YOUR CONNECTIONS</div><h2 id="transfer-title">다른 PC로 로그인 정보 옮기기</h2></div><button type="button" class="icon-button" data-close="transfer-dialog" aria-label="로그인 정보 이전 닫기"><span data-icon="x"></span></button></div>
+    <div class="dialog-body">
+      <p class="settings-note">다섯 스토어의 저장된 아이디·비밀번호, 자동 로그인 설정과 GPT 키를 함께 옮깁니다. 새 PC에서 한 번 복원하면 다시 입력하지 않아도 됩니다.</p>
+      <form id="transfer-export-form" class="transfer-section">
+        <h3>1. 지금 PC에서 이전 파일 만들기</h3>
+        <label>새 이전용 암호<input id="transfer-export-password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required><small>10자 이상으로 정하고 기억해 주세요. 새 PC에서 필요하며, 이 앱에서는 암호를 복구할 수 없습니다.</small></label>
+        <label>이전용 암호 확인<input id="transfer-export-confirm" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+        <button type="submit" id="transfer-export-button" class="button primary">암호화된 이전 파일 만들기</button>
+        <a id="transfer-download" class="external-link" hidden>이전 파일 다시 저장하기 ↓</a>
+      </form>
+      <div class="setting-divider"></div>
+      <form id="transfer-import-form" class="transfer-section">
+        <h3>2. 새 PC에서 이전 파일 복원하기</h3>
+        <label>이전 파일<input id="transfer-file" type="file" accept=".json,application/json" required></label>
+        <label>파일을 만들 때 정한 암호<input id="transfer-import-password" type="password" minlength="10" maxlength="128" autocomplete="off" required></label>
+        <label class="check-label"><input id="transfer-confirm-replace" type="checkbox" required>파일에 포함된 로그인 정보와 GPT 키로 이 PC의 연결 설정을 바꿉니다.</label>
+        <button type="submit" id="transfer-import-button" class="button primary">이 PC에 복원하고 자동 연결</button>
+      </form>
+      <p class="settings-note">파일과 암호를 본인의 새 PC로 옮겨 주세요. 리뷰·초안·브라우저 쿠키는 포함되지 않습니다. 추가 인증이 나오면 연결 창에서 직접 완료하세요. 옮긴 뒤 비밀번호를 바꾸면 사용하는 PC마다 연결 설정을 수정해 주세요.</p>
+      <p id="transfer-message" class="auth-state" role="status" aria-live="polite">현재 PC의 로그인 정보는 파일을 만들어도 그대로 유지됩니다.</p>
+    </div>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body></html>

@@ -7,6 +7,9 @@ import { once } from 'node:events';
 
 // UI fixtures own their static server and never depend on a running seller connection.
 let uiServer, appUrl;
+async function openConnectionSettings(page) {
+  if (await page.locator('#connection-settings-panel').getAttribute('open') === null) await page.locator('#connection-settings-panel > summary').click();
+}
 before(async () => {
   uiServer = http.createServer(async (req, res) => {
     const files = { '/': 'index.html', '/app.js': 'app.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
@@ -19,13 +22,43 @@ before(async () => {
 });
 after(async () => { uiServer.closeAllConnections(); await new Promise(resolve => uiServer.close(resolve)); });
 
+test('credential transfer UI downloads only the encrypted file, requires confirmation, clears secrets, and handles a wrong password', async t => {
+  const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
+  const page=await browser.newPage({acceptDownloads:true,viewport:{width:1280,height:1000}}),requests=[],errors=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  const backup={format:'review-desk-login-backup',version:1,ciphertext:'encrypted-fixture-only'};
+  await page.route('**/api/**',async route=>{
+    const url=new URL(route.request().url()),data=route.request().postData()?route.request().postDataJSON():null;let result={};let status=200;
+    if(url.pathname==='/api/session')result={csrf:'test',settings:{brand:'테스트'},aiConfigured:false};
+    else if(url.pathname==='/api/reviews')result={reviews:[],drafts:{}};
+    else if(url.pathname==='/api/status')result={connected:false,aiConfigured:false};
+    else if(url.pathname==='/api/credentials/export'){requests.push({route:url.pathname,data});result={backup,providers:['naver','baemin'],includesGPT:true};}
+    else if(url.pathname==='/api/credentials/import'){requests.push({route:url.pathname,data});if(data.password==='wrong-password'){status=400;result={error:'이전 파일의 암호가 다릅니다.'};}else result={providers:['naver','baemin'],includesGPT:true,aiConfigured:true,aiKey:{saved:true}};}
+    else assert.fail('Unexpected endpoint '+url.pathname);
+    await route.fulfill({status,contentType:'application/json',body:JSON.stringify(result)});
+  });
+  await page.goto(appUrl);await page.locator('#transfer-open').click();
+  await page.locator('#transfer-export-password').fill('test-password');await page.locator('#transfer-export-confirm').fill('different-password');await page.locator('#transfer-export-button').click();
+  assert.equal(requests.length,0);assert.match(await page.locator('#transfer-message').innerText(),/서로 다릅니다/);
+  await page.locator('#transfer-export-password').fill('test-password');await page.locator('#transfer-export-confirm').fill('test-password');
+  const downloaded=page.waitForEvent('download');await page.locator('#transfer-export-button').click();const file=await downloaded;
+  assert.deepEqual(JSON.parse(await readFile(await file.path(),'utf8')),backup);assert.equal(requests[0].data.password,'test-password');assert.equal(await page.locator('#transfer-export-password').inputValue(),'');
+  const choose=()=>page.locator('#transfer-file').setInputFiles({name:'login.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(backup))});
+  await choose();await page.locator('#transfer-import-password').fill('wrong-password');await page.locator('#transfer-import-button').click();assert.equal(requests.length,1);
+  await page.locator('#transfer-confirm-replace').check();await page.locator('#transfer-import-button').click();await page.getByText('이전 파일의 암호가 다릅니다.',{exact:true}).waitFor();assert.equal(await page.locator('#transfer-import-password').inputValue(),'');
+  await page.locator('#transfer-import-password').fill('test-password');await page.locator('#transfer-import-button').click();await page.waitForFunction(()=>document.querySelector('#transfer-message').textContent.includes('복원이 완료'));
+  assert.equal(requests.at(-1).data.confirmed,true);assert.deepEqual(requests.at(-1).data.backup,backup);assert.equal(await page.locator('#transfer-file').inputValue(),'');
+  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.locator('#transfer-export-password').fill('clear-on-close');await page.locator('[data-close="transfer-dialog"]').click();assert.equal(await page.locator('#transfer-export-password').inputValue(),'');assert.deepEqual(errors,[]);
+});
+
 test('one shared period refreshes every top store count, survives switching tabs, and never labels stale results as current', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), requests = [], errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const channels = ['naver','coupang','ably','baemin-teawest','baemin-besti','coupangeats-teawest','coupangeats-besti'];
   const rows = channels.flatMap(platform => ['2026.11.10','2026.06.10','2026.01.10'].map((date,i) => ({ id: `${platform}-${i}`, platform, product: '상품', content: '기간별 후기', author: '고객', rating: 5, date, hasReply: false })));
-  const metadata = (period, sequence) => Object.fromEntries(channels.map(p => [p,{period:p.startsWith('baemin-')&&period==='1y'?'6m':period,from:period==='1m'?'2026-10-16':'2025-11-16',to:'2026-11-15',lastSync:sequence}]));
+  const metadata = (period, sequence) => Object.fromEntries(channels.map(p => [p,{period,from:period==='1m'?'2026-10-16':'2025-11-16',to:'2026-11-15',lastSync:new Date(Date.UTC(2026,10,15,0,0,sequence==='before'?0:sequence==='partial'?1:Number(sequence)+1)).toISOString()}]));
   let data = { reviews: rows, drafts: {}, reviewPeriod:'1y', syncs: metadata('1y','before') }, finish, partialFailure = false;
   const hold = new Promise(resolve => { finish = resolve; });
   await page.route('**/api/**', async route => {
@@ -37,7 +70,7 @@ test('one shared period refreshes every top store count, survives switching tabs
       const query=req.postDataJSON(); requests.push(query); assert.equal(query.platform,'all');
       if(requests.length===1) await hold;
       const old=data, reviewPeriod=query.period;
-      const reviews=rows.filter(r=>reviewPeriod==='1m'?r.date>'2026.10.15':r.platform.startsWith('baemin-')?r.date>'2026.05.15':true);
+      const reviews=rows.filter(r=>reviewPeriod==='1m'?r.date>'2026.10.15':true);
       data={...data,reviews,reviewPeriod,syncs:metadata(reviewPeriod,String(requests.length))};
       const warnings=[];
       if(partialFailure){const p='coupangeats-besti';data.syncs[p]=old.syncs[p];data.reviews=[...data.reviews.filter(r=>r.platform!==p),...old.reviews.filter(r=>r.platform===p)];warnings.push({platform:p,message:'테스트 조회 실패'});}
@@ -59,10 +92,10 @@ test('one shared period refreshes every top store count, survives switching tabs
   assert.equal(await page.locator('#period').inputValue(),'1m'); assert.equal(await page.locator('#stat-total').textContent(),'1');
   await page.locator('#period').selectOption('1y'); await page.waitForFunction(()=>!document.querySelector('#period').disabled);
   assert.equal(await page.locator('#platform-coupangeats-teawest').textContent(),'3');
-  assert.equal(await page.locator('#platform-baemin-teawest').textContent(),'2');
-  assert.match(await page.locator('.platform-tabs [data-platform="baemin-teawest"]').textContent(),/최대 6개월/);
+  assert.equal(await page.locator('#platform-baemin-teawest').textContent(),'3');
+  assert.doesNotMatch(await page.locator('.platform-tabs [data-platform="baemin-teawest"]').textContent(),/최대 6개월/);
   await page.locator('.platform-tabs [data-platform="baemin-besti"]').click(); assert.equal(await page.locator('#period').inputValue(),'1y');
-  assert.equal(await page.locator('#stat-total').textContent(),'2');
+  assert.equal(await page.locator('#stat-total').textContent(),'3');
   partialFailure=true;
   await page.locator('#period').selectOption('1m'); await page.waitForFunction(()=>!document.querySelector('#period').disabled);
   assert.equal(await page.locator('#platform-baemin-besti').textContent(),'1'); assert.equal(await page.locator('#platform-coupangeats-besti').textContent(),'조회 실패');
@@ -96,7 +129,9 @@ test('connection settings align across five providers and support password-only 
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto(appUrl); await page.locator('#auth-open').waitFor();
+  await page.goto(appUrl);
+  assert.equal(await page.locator('#auth-open').isVisible(), false);
+  await openConnectionSettings(page); await page.locator('#auth-open').waitFor();
   const boxes = await page.locator('.connection-setting-button').evaluateAll(buttons => buttons.map(b => { const r = b.getBoundingClientRect(); return { top: r.top, width: r.width, height: r.height }; }));
   assert.equal(boxes.length, 5); for (const box of boxes) { assert.equal(box.top, boxes[0].top); assert.ok(Math.abs(box.width - boxes[0].width) < 1); assert.equal(box.height, boxes[0].height); }
   for (const prefix of ['auth', 'coupang-auth', 'ably-auth']) {
@@ -121,7 +156,7 @@ test('connection settings align across five providers and support password-only 
     assert.equal(opened.at(-1), provider);
     await page.locator('#delivery-auth-password').fill('synthetic-next-password'); await page.locator('#delivery-auth-save').click(); await page.locator('#delivery-settings-dialog[open]').waitFor({ state: 'hidden' }); await page.waitForFunction(() => !document.querySelector('#delivery-auth-save').disabled);
     assert.equal(changes.at(-1).username, ''); assert.equal(changes.at(-1).password, 'synthetic-next-password');
-    await page.reload(); await page.locator(`#${button}`).click(); await page.locator('#delivery-settings-dialog[open]').waitFor(); assert.equal(await page.locator('#delivery-auth-password').inputValue(), ''); assert.equal(await page.locator('#delivery-auth-enabled').isChecked(), true);
+    await page.reload(); await openConnectionSettings(page); await page.locator(`#${button}`).click(); await page.locator('#delivery-settings-dialog[open]').waitFor(); assert.equal(await page.locator('#delivery-auth-password').inputValue(), ''); assert.equal(await page.locator('#delivery-auth-enabled').isChecked(), true);
     await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.locator('#delivery-auth-forget').click(); await page.waitForFunction(() => document.querySelector('#delivery-auth-forget').disabled); assert.equal(await page.locator('#delivery-auth-enabled').isChecked(), false);
     await page.locator('[data-close="delivery-settings-dialog"]').click();
@@ -161,7 +196,11 @@ test('browser: background reviews update without reload, preserve active edits a
   assert.equal(await page.locator('#reply-editor').inputValue(), '자동으로 새 리뷰가 와도 유지할 초안입니다.');
   assert.equal(await page.locator('.original-review').innerText(), naver.content);
   assert.equal(await page.locator('#reply-editor').evaluate(e => document.activeElement === e && e.selectionStart === 4), true);
-  assert.match(await page.locator('#live-update-message').innerText(), /3개/); assert.match(await page.locator('#auto-sync-platforms').innerText(), /추가 인증/);
+  assert.match(await page.locator('#live-update-message').innerText(), /3개/);
+  assert.equal(await page.locator('#auto-sync-platforms').isVisible(), false);
+  assert.match(await page.locator('#auto-sync-alert').innerText(), /1개 확인 필요/);
+  await page.locator('#auto-sync-details > summary').click();
+  assert.match(await page.locator('#auto-sync-platforms').innerText(), /추가 인증/);
   await page.locator('#auto-sync-interval').selectOption('30'); await page.waitForFunction(() => !document.querySelector('#auto-sync-interval').disabled);
   await page.locator('#auto-sync-enabled').uncheck(); await page.waitForFunction(() => !document.querySelector('#auto-sync-enabled').disabled);
   assert.deepEqual(settings, [{ enabled: true, intervalMinutes: 30 }, { enabled: false, intervalMinutes: 30 }]);
@@ -202,7 +241,7 @@ test('browser: Ably tab shows satisfaction without stars, filters independently,
   await page.locator('#rating-filter').selectOption('unsatisfied'); assert.equal(await page.locator('.review-card').count(), 1);
   await page.locator('#rating-filter').selectOption('satisfied'); assert.equal(await page.locator('.review-card').count(), 1);
   await page.locator('#ably-connect-button').click(); await page.locator('#ably-connection-banner').waitFor({ state: 'hidden' }); assert.deepEqual(calls[0], { platform: 'ably' });
-  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(calls[1], { platform: 'ably', period: '6m' });
+  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(calls[1], { platform: 'all', period: '3m' });
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.locator('.platform-tabs [data-platform="naver"]').click(); assert.equal(await page.locator('#rating-filter').inputValue(), 'all'); assert.equal(await page.locator('#reply-editor').inputValue(), '보존할 초안입니다.');
   await page.locator('.platform-tabs [data-platform="coupang"]').click(); assert.equal(await page.locator('.review-card').count(), 1);
@@ -225,12 +264,12 @@ test('browser: Ably automatic login saves once, clears secrets, supports MFA rec
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto(appUrl); await page.locator('#ably-auth-open').click(); await page.locator('#ably-auth-dialog[open]').waitFor();
+  await page.goto(appUrl); await openConnectionSettings(page); await page.locator('#ably-auth-open').click(); await page.locator('#ably-auth-dialog[open]').waitFor();
   await page.locator('#ably-auth-username').fill('synthetic-user'); await page.locator('#ably-auth-password').fill('synthetic-password');
   await page.locator('#ably-auth-form button[type=submit]').click(); await page.locator('#ably-auth-dialog[open]').waitFor({ state: 'hidden' });
   assert.deepEqual(saved, { enabled: true, method: 'ably', username: 'synthetic-user', password: 'synthetic-password' });
   assert.equal(await page.locator('#ably-auth-password').inputValue(), '');
-  await page.reload(); await page.locator('.platform-tabs [data-platform="ably"]').click(); await page.getByText('에이블리 추가 인증이 필요합니다.', { exact: false }).first().waitFor();
+  await page.reload(); await openConnectionSettings(page); await page.locator('.platform-tabs [data-platform="ably"]').click(); await page.getByText('에이블리 추가 인증이 필요합니다.', { exact: false }).first().waitFor();
   await page.locator('#ably-auth-open').click(); assert.equal(await page.locator('#ably-auth-username').inputValue(), ''); assert.equal(await page.locator('#ably-auth-password').inputValue(), '');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.locator('#ably-auth-browser').click(); await page.waitForFunction(() => document.querySelector('#ably-auth-state').textContent.includes('에이블리에 연결되어 있습니다.'));
@@ -258,12 +297,12 @@ test('browser: Coupang automatic login saves once, clears secrets, supports MFA 
     else assert.fail(`Unexpected request ${url.pathname}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto(appUrl); await page.locator('#coupang-auth-open').click(); await page.locator('#coupang-auth-dialog[open]').waitFor();
+  await page.goto(appUrl); await openConnectionSettings(page); await page.locator('#coupang-auth-open').click(); await page.locator('#coupang-auth-dialog[open]').waitFor();
   await page.locator('#coupang-auth-username').fill('synthetic-user'); await page.locator('#coupang-auth-password').fill('synthetic-password');
   await page.locator('#coupang-auth-form button[type=submit]').click(); await page.locator('#coupang-auth-dialog[open]').waitFor({ state: 'hidden' });
   assert.deepEqual(saved, { enabled: true, method: 'coupang', username: 'synthetic-user', password: 'synthetic-password' });
   assert.equal(await page.locator('#coupang-auth-password').inputValue(), '');
-  await page.reload(); await page.locator('.platform-tabs [data-platform="coupang"]').click(); await page.getByText('쿠팡 추가 인증이 필요합니다.', { exact: false }).first().waitFor();
+  await page.reload(); await openConnectionSettings(page); await page.locator('.platform-tabs [data-platform="coupang"]').click(); await page.getByText('쿠팡 추가 인증이 필요합니다.', { exact: false }).first().waitFor();
   await page.locator('#coupang-auth-open').click(); assert.equal(await page.locator('#coupang-auth-username').inputValue(), ''); assert.equal(await page.locator('#coupang-auth-password').inputValue(), '');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.locator('#coupang-auth-browser').click(); await page.waitForFunction(() => document.querySelector('#coupang-auth-state').textContent.includes('쿠팡에 연결되어 있습니다.'));
@@ -379,11 +418,11 @@ test('browser: auto-login setup clears secrets and verification recovery never s
     else { assert.fail(`Unexpected route ${url.pathname}`); }
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
   });
-  await page.goto(appUrl); await page.locator('#auth-open').click(); await page.locator('#auth-dialog[open]').waitFor();
+  await page.goto(appUrl); await openConnectionSettings(page); await page.locator('#auth-open').click(); await page.locator('#auth-dialog[open]').waitFor();
   await page.locator('#auth-username').fill('test-only-user'); await page.locator('#auth-password').fill('test-only-password');
   await page.locator('#auth-form button[type=submit]').click(); await page.locator('#auth-dialog[open]').waitFor({ state: 'hidden' });
   assert.equal(input.enabled, true); assert.equal(input.password, 'test-only-password'); assert.equal(await page.locator('#auth-password').inputValue(), '');
-  connected = false; autoLogin = { ...autoLogin, blocked: 'verification', phase: 'needs_verification' }; await page.reload();
+  connected = false; autoLogin = { ...autoLogin, blocked: 'verification', phase: 'needs_verification' }; await page.reload(); await openConnectionSettings(page);
   await page.getByText('추가 인증이 필요합니다.', { exact: false }).first().waitFor();
   assert.equal(await page.locator('#connection-banner').isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

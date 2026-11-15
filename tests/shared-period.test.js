@@ -9,7 +9,7 @@ import { Store, AppError } from '../src/core.js';
 import { platforms } from '../public/platforms.js';
 import { cleanupTestDirectory } from './cleanup.js';
 
-test('shared period queries every shop, caps Baemin at six months, persists selection, and reports partial failures', async t => {
+test('shared period queries every shop including a full Baemin year, persists selection, and reports partial failures', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'review-http-test-')), calls = [];
   let fail = false;
   const connectors = Object.fromEntries(platforms.map(platform => [platform, {
@@ -31,7 +31,7 @@ test('shared period queries every shop, caps Baemin at six months, persists sele
   for(const platform of platforms){assert.equal(month.syncs[platform].period,'1m');assert.equal(month.reviews.filter(r=>r.platform===platform).length,1);}
   fail=true;calls.length=0;
   const year=await sync('1y').then(r=>r.json());assert.equal(year.reviewPeriod,'1y');assert.equal(year.warnings.length,1);assert.equal(year.warnings[0].platform,'coupangeats-besti');
-  for(const call of calls) assert.equal(call.period,call.platform.startsWith('baemin-')?'6m':'1y');
-  assert.equal(year.syncs['baemin-teawest'].total,2);assert.equal(year.syncs['coupangeats-teawest'].total,3);assert.equal(year.syncs['coupangeats-besti'].period,'1m');
+  for(const call of calls) assert.equal(call.period,'1y');
+  assert.equal(year.syncs['baemin-teawest'].total,3);assert.equal(year.syncs['coupangeats-teawest'].total,3);assert.equal(year.syncs['coupangeats-besti'].period,'1m');
   const reloaded=new Store(directory);await reloaded.init();assert.equal(reloaded.data.reviewPeriod,'1y');
 });

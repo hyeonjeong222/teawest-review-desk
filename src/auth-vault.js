@@ -67,11 +67,12 @@ export class AuthVault {
     if (!this.data.enabled || !this.data.encrypted) return null;
     return this.decryptCredentials();
   }
-  async decryptCredentials() {
-    const plain = await this.protect(this.data.encrypted, true);
+  async decryptCredentials(snapshot = this.data) {
+    const data = { ...snapshot };
+    const plain = await this.protect(data.encrypted, true);
     try {
       const saved = JSON.parse(Buffer.from(plain, 'base64').toString('utf8'));
-      if (saved.method !== this.data.method || typeof saved.username !== 'string' || !saved.username.trim() || saved.username.length > 200 || typeof saved.password !== 'string' || !saved.password || saved.password.length > 500) throw new Error('Invalid credentials');
+      if (saved.method !== data.method || typeof saved.username !== 'string' || !saved.username.trim() || saved.username.length > 200 || typeof saved.password !== 'string' || !saved.password || saved.password.length > 500) throw new Error('Invalid credentials');
       return saved;
     } catch { throw new AppError('저장된 로그인 정보를 다시 입력해 주세요.', 503, 'VAULT_UNAVAILABLE'); }
   }

@@ -137,12 +137,12 @@ function renderPeriodControls() {
   const period = selectedPeriod(); $('#period').value = period;
   $('#period').disabled = state.syncing || state.publishing;
   const applied = info ? `${platformLabel(platform)} · ${periodLabels[info.period] || '조회 기간'} · ${platformReviews().length}개` : `${platformLabel(platform)} · 가져온 리뷰 없음`;
-  const limit = period === '1y' ? ' 배민은 최대 6개월로 조회합니다.' : '';
+  const limit = period === '1y' && request ? ' 배민은 기간을 나누어 1년치를 조회합니다.' : '';
   $('#period-status').textContent = request
     ? `전체 스토어 ${periodLabels[period]} 조회 중 (${platforms.filter(p => !waitingForPeriod(p)).length}/${platforms.length}) · 현재 목록: ${applied}.${limit}`
     : failedPeriod(platform) ? `조회 실패 · 기존 목록: ${applied}. 다시 새로고침해 주세요.${limit}`
     : info?.period !== effectiveReviewPeriod(platform, period) ? `전체 스토어 ${periodLabels[period]} 선택 · 이 매장은 조회가 필요합니다. 기존 목록: ${applied}.${limit}`
-    : `전체 스토어 ${periodLabels[period]} · 현재 목록: ${applied}.${limit}`;
+    : applied;
 }
 function renderStats() {
   renderPeriodControls();
@@ -161,9 +161,6 @@ function renderStats() {
     const info = syncInfo(platform), period = effectiveReviewPeriod(platform, selectedPeriod());
     const text = waitingForPeriod(platform) ? '조회 중' : failedPeriod(platform) ? '조회 실패' : info?.period !== period ? '조회 필요' : String(state.reviews.filter(r => platformOf(r) === platform).length);
     const count = $(`#platform-${platform}`); count.textContent = text;
-    const limited = period !== selectedPeriod();
-    const note = count.parentElement.querySelector('.platform-period-limit'); if (note) note.remove();
-    if (limited) count.insertAdjacentHTML('afterend', '<small class="platform-period-limit">최대 6개월</small>');
     count.parentElement.title = `${platformLabel(platform)} · ${periodLabels[period]} · ${text}${/^\d+$/.test(text) ? '개' : ''}`;
   }
   for (const button of document.querySelectorAll('[data-platform]')) { const active = button.dataset.platform === state.platform; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); }
@@ -302,6 +299,9 @@ function renderAutoSync() {
   $('#auto-sync-enabled').disabled = Boolean(state.savingAutoSync); $('#auto-sync-interval').disabled = Boolean(state.savingAutoSync);
   const time = value => value ? new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '';
   const jobs = config.platforms || {}, running = Object.values(jobs).some(job => ['checking', 'syncing'].includes(job.phase));
+  const errorCount = config.enabled ? Object.values(jobs).filter(job => job.error).length : 0;
+  $('#auto-sync-alert').hidden = !errorCount;
+  $('#auto-sync-alert').textContent = `${errorCount}개 확인 필요`;
   const next = Object.values(jobs).map(job => job.nextRunAt).filter(Boolean).sort()[0];
   $('#auto-sync-summary').textContent = state.savingAutoSync ? '설정 저장 중…' : !config.enabled ? running ? '진행 중인 조회를 마친 뒤 중지합니다' : '자동 가져오기 꺼짐' : running ? '스토어에서 새 리뷰를 확인하고 있어요' : next ? `다음 확인 ${time(next)}` : '자동 가져오기 켜짐';
   $('#auto-sync-platforms').innerHTML = platforms.map(platform => {
@@ -372,6 +372,10 @@ async function refreshStatus() {
 }
 function renderConnections() {
   if ($('#delivery-settings-dialog').open) renderDeliverySettings();
+  const connectedServices = ['naver', 'coupang', 'ably'].filter(platform => state.platforms[platform]?.connected).length
+    + ['baemin', 'coupangeats'].filter(provider => Object.entries(deliveryPlatforms).some(([platform, config]) => config.provider === provider && state.platforms[platform]?.connected)).length;
+  $('#connection-summary').textContent = `${connectedServices}/5 연결됨`;
+  $('#connection-summary').classList.toggle('has-attention', connectedServices < 5);
   for (const [platform, config] of Object.entries(deliveryPlatforms)) {
     const status = state.platforms[platform] || {}, connected = Boolean(status.connected);
     const auth = state.deliveryAutoLogin[config.provider] || {};
@@ -379,7 +383,7 @@ function renderConnections() {
     document.getElementById(platform + '-connection-dot').classList.toggle('connected', connected);
   }
   const delivery = deliveryPlatforms[state.platform];
-  $('#delivery-connection-banner').hidden = !delivery;
+  $('#delivery-connection-banner').hidden = !delivery || Boolean(state.platforms[state.platform]?.connected);
   if (delivery) { const status = state.platforms[state.platform] || {}; $('#delivery-connection-message').textContent = status.connected ? (status.storeName || delivery.brand) + ' 리뷰를 가져오고 답글을 등록할 수 있습니다.' : status.message || delivery.providerLabel + ' 연결 창에서 로그인해 주세요.'; $('#delivery-connect-button').textContent = delivery.label + ' 연결 창 열기 ↗'; }
 
   const coupang = Boolean(state.platforms.coupang?.connected), auth = state.coupangAutoLogin || {};
@@ -556,6 +560,59 @@ $('#settings-key-forget').addEventListener('click', async () => {
   finally { state.savingSettings = false; saveButton.disabled = false; renderAIStatus(); }
 });
 $('#settings-dialog').addEventListener('close', () => { $('#setting-key').value = ''; });
+
+let transferBusy=false, transferDownloadURL=null;
+const transferNames={naver:'네이버',coupang:'쿠팡윙',ably:'에이블리',baemin:'배달의민족',coupangeats:'쿠팡이츠'};
+const transferSummary=result=>[...result.providers.map(p=>transferNames[p]),...(result.includesGPT?['GPT 키']:[])].join(' · ');
+function transferWorking(value) {
+  transferBusy=value;
+  for(const el of $('#transfer-dialog').querySelectorAll('button,input'))el.disabled=value;
+}
+function clearTransferPasswords() {for(const el of $('#transfer-dialog').querySelectorAll('input[type="password"]'))el.value='';}
+$('#transfer-open').addEventListener('click',()=>{
+  if(state.publishing)return;
+  clearTransferPasswords();$('#transfer-file').value='';$('#transfer-confirm-replace').checked=false;
+  $('#transfer-message').textContent='현재 PC의 로그인 정보는 파일을 만들어도 그대로 유지됩니다.';
+  $('#transfer-dialog').showModal();
+});
+$('#transfer-export-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(transferBusy)return;
+  let password=$('#transfer-export-password').value;
+  if(password!==$('#transfer-export-confirm').value){clearTransferPasswords();$('#transfer-message').textContent='이전용 암호가 서로 다릅니다. 다시 입력해 주세요.';return;}
+  transferWorking(true);clearTransferPasswords();$('#transfer-download').hidden=true;
+  $('#transfer-message').textContent='저장된 로그인 정보와 GPT 키를 암호화하고 있습니다.';
+  try{
+    const result=await api('/api/credentials/export',{password});
+    if(transferDownloadURL)URL.revokeObjectURL(transferDownloadURL);
+    transferDownloadURL=URL.createObjectURL(new Blob([JSON.stringify(result.backup)],{type:'application/json'}));
+    const link=$('#transfer-download');link.href=transferDownloadURL;link.download=`review-desk-login-${new Date().toISOString().slice(0,10)}.json`;link.hidden=false;link.click();
+    $('#transfer-message').textContent=`${transferSummary(result)} 이전 파일을 만들었습니다. 다운로드한 파일과 정한 암호로 새 PC에서 복원하세요.`;
+  }catch(e){$('#transfer-message').textContent=e.message;}
+  finally{password='';transferWorking(false);}
+});
+$('#transfer-import-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(transferBusy)return;
+  const file=$('#transfer-file').files[0];
+  if(!file || file.size>24576){$('#transfer-message').textContent='리뷰 앱에서 만든 이전 파일을 선택해 주세요. 파일은 24KB 이하여야 합니다.';return;}
+  if(!$('#transfer-confirm-replace').checked)return;
+  let password=$('#transfer-import-password').value;clearTransferPasswords();transferWorking(true);
+  $('#transfer-message').textContent='파일을 확인하고 이 PC에 저장하고 있습니다. 진행 중인 스토어 조회가 있으면 완료 후 처리합니다.';
+  try{
+    let backup;try{backup=JSON.parse(await file.text());}catch{throw new Error('이전 파일을 읽을 수 없습니다. 리뷰 앱에서 만든 파일을 선택해 주세요.');}
+    const result=await api('/api/credentials/import',{backup,password,confirmed:true});
+    state.aiConfigured=result.aiConfigured;state.aiKey=result.aiKey;renderAIStatus();
+    $('#transfer-file').value='';$('#transfer-confirm-replace').checked=false;
+    $('#transfer-message').textContent=`${transferSummary(result)} 복원이 완료됐습니다. 자동 로그인을 켜 둔 스토어에 연결합니다. 추가 인증이 나오면 연결 창에서 완료하세요.`;
+    void refreshStatus();
+  }catch(e){$('#transfer-message').textContent=e.message;}
+  finally{password='';transferWorking(false);}
+});
+$('#transfer-dialog').addEventListener('cancel',event=>{if(transferBusy)event.preventDefault();});
+$('#transfer-dialog').addEventListener('close',()=>{
+  clearTransferPasswords();$('#transfer-file').value='';$('#transfer-confirm-replace').checked=false;
+  if(transferDownloadURL){URL.revokeObjectURL(transferDownloadURL);transferDownloadURL=null;}
+  $('#transfer-download').hidden=true;$('#transfer-download').removeAttribute('href');
+});
 document.addEventListener('click', event => {
   const platform = event.target.closest('[data-platform]'); if (platform) { selectPlatform(platform.dataset.platform); return; }
   const filter = event.target.closest('[data-filter]'); if (filter) { state.filter = filter.dataset.filter; renderList(); return; }

@@ -19,9 +19,11 @@ import { EatsConnector } from './eats.js';
 import { DeliveryAccountConnector } from './delivery-login.js';
 import { deliveryPlatforms, platforms, platformLabels, effectiveReviewPeriod } from '../public/platforms.js';
 import { reviewPlatform, replyLimit } from './core.js';
+import { CredentialTransfer, recoverCredentialTransfer } from './credential-transfer.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export async function createApp({ directory = path.join(root, '.local'), connector, coupangConnector, ablyConnector, deliveryConnectors = {}, deliveryAccountConnectors = {}, deliveryVaults = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000 } = {}) {
+  await recoverCredentialTransfer(directory);
   const store = new Store(directory); await store.init();
   connector ||= new NaverConnector(directory);
   const service = new ReviewService(store, connector, ai);
@@ -60,6 +62,8 @@ export async function createApp({ directory = path.join(root, '.local'), connect
   const autoSync = new AutoReviewSync(store, sources);
   keyVault ||= new APIKeyVault(directory, ai); await keyVault.init();
   const settingsQueue = new SerialQueue();
+  const credentialTransfer = new CredentialTransfer({directory,auths:{naver:autoLogin,coupang:coupangAutoLogin,ably:ablyAutoLogin,...deliveryAuth},keyVault,ai,settingsQueue});
+  let transferring=false;
   const aiState = () => ({ aiConfigured: ai.configured, aiKey: keyVault.publicState() });
   const reviewState = () => ({ reviews: store.data.reviews, drafts: store.data.drafts, lastSync: store.data.lastSync, sync: store.data.sync, syncs: store.data.syncs, reviewPeriod: store.data.reviewPeriod || store.data.syncs?.naver?.period || store.data.sync?.period || '3m', autoSync: autoSync.publicState() });
   const csrf = randomBytes(32).toString('hex');
@@ -86,6 +90,16 @@ export async function createApp({ directory = path.join(root, '.local'), connect
       if (req.method === 'POST') {
         if (!origins.has(req.headers.origin) || req.headers['x-review-token'] !== csrf) throw new AppError('이 페이지에서 다시 시도해 주세요.', 403, 'CSRF');
         const data = await body(req);
+        if(route==='/api/credentials/export' || route==='/api/credentials/import') {
+          if(transferring)throw new AppError('로그인 정보 이전을 처리 중입니다. 잠시 기다려 주세요.',409,'TRANSFER_BUSY');
+          transferring=true;
+          try {
+            if(route.endsWith('/export'))return json(res,200,await credentialTransfer.export(data.password));
+            const result=await credentialTransfer.restore(data.backup,data.password,data.confirmed);
+            for(const provider of result.providers)void credentialTransfer.auths[provider].schedule();
+            return json(res,200,{...result,...aiState()});
+          } finally {data.password='';transferring=false;}
+        }
         if (route === '/api/auto-sync/settings') return json(res, 200, await autoSync.save(data));
         if (route === '/api/browser/open') {
           if (deliveryPlatforms[data.platform]) {
