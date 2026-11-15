@@ -36,7 +36,7 @@ test('Baemin waits for calendar month commits and retries a collapsed range befo
     document.querySelector('#prev').onclick=()=>setTimeout(()=>{month--;render();},80);
     document.querySelector('#next').onclick=()=>setTimeout(()=>{month++;render();},80);
     document.querySelector('#reset').onclick=()=>{dates=[];};
-    document.querySelector('#applyCalendar').onclick=()=>{calendar.hidden=true;setTimeout(()=>{selected.textContent=(attempts===1?dates[1]:dates[0])+' ~ '+dates[1];},80);};
+    document.querySelector('#applyCalendar').onclick=()=>{calendar.hidden=true;setTimeout(()=>{selected.textContent=attempts===1?dates[1]:dates[0]+' ~ '+dates[1];},80);};
     document.querySelector('#applySheet').onclick=()=>{window.applied.push(selected.textContent);sheet.hidden=true;};
     </script>`);
   await selectBaeminDates(page,{from:'2025-11-17',to:'2026-05-16'});
@@ -54,9 +54,9 @@ test('Baemin windows cover a complete year without gaps or overlaps, including m
 });
 test('Baemin year combines complete windows and rejects incomplete, duplicate, or changed-store results', async () => {
   const connector=new BaeminConnector({},'baemin-teawest');let calls=[];
-  connector.collect=async(period,target,range)=>{calls.push(range);return {store:'1 · 티웨스트',storeName:'티웨스트',total:1,reviews:[{id:range.from,date:range.from}]};};
+  connector.collect=async(period,target,range)=>{calls.push(range);return {store:'1 · 티웨스트',storeName:'티웨스트',total:1,reviews:[{id:range.from,date:range.from}],...range};};
   const result=await connector.sync('1y');assert.equal(result.period,'1y');assert.equal(result.total,calls.length);assert.ok(calls.length>=2);assert.equal(result.from,calls[0].from);assert.equal(result.to,calls.at(-1).to);
-  connector.collect=async()=>({store:'1',total:1,reviews:[{id:'same'}]});await assert.rejects(connector.sync('1y'),e=>e.code==='INCOMPLETE_SYNC');
+  connector.collect=async(period,target,range)=>({store:'1',total:1,reviews:[{id:'same'}],...range});await assert.rejects(connector.sync('1y'),e=>e.code==='INCOMPLETE_SYNC');
   connector.collect=async()=>({store:'1',total:2,reviews:[{id:Math.random()}]});await assert.rejects(connector.sync('1y'));
-  let index=0;connector.collect=async()=>({store:String(++index),total:0,reviews:[]});await assert.rejects(connector.sync('1y'),e=>e.code==='STORE_CHANGED');
+  let index=0;connector.collect=async(period,target,range)=>({store:String(++index),total:0,reviews:[],...range});await assert.rejects(connector.sync('1y'),e=>e.code==='STORE_CHANGED');
 });

@@ -7,6 +7,7 @@ import { readRenderedRows, readReviewDetail } from './naver-dom.js';
 import { REVIEW_URL, isNaverPage, loginWithCredentials } from './naver-login.js';
 import { browserCandidates } from './browser-path.js';
 import { withActiveReviewPage } from './browser-activity.js';
+import {reviewRange,isoDay} from './review-cache.js';
 
 const periods = { '1m': '1개월', '3m': '3개월', '6m': '6개월', '1y': '1년' };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -172,6 +173,42 @@ export class NaverConnector {
     const dates = await frame.locator('input.date-picker-input').evaluateAll(els => els.map(e => e.value));
     if (collected.size !== total) throw new AppError(`네이버에는 ${total}건이 있지만 ${collected.size}건만 읽었습니다. 기존 목록을 유지합니다. 다시 동기화해 주세요.`, 502, 'INCOMPLETE_SYNC');
     return { reviews: Array.from(collected.values()), total, store, period, from: dates[0], to: dates[1] };
+    });
+  }
+  async syncRange(range,period='3m') {
+    // Naver exposes preset dates through a read-only calendar. Read the smallest
+    // complete preset and retain only the requested slice for reconciliation.
+    const preset=['1m','3m','6m','1y'].find(value=>reviewRange(value).from<=range.from);
+    if(!preset)throw new AppError('네이버에서 확인 가능한 최근 1년 범위를 벗어났습니다.',400,'PERIOD_UNSUPPORTED');
+    const result=await this.sync(preset);
+    if(isoDay(result.from)>range.from||isoDay(result.to)<range.to)throw new AppError('네이버 조회 날짜 범위를 확인하지 못했습니다.',502,'INCOMPLETE_SYNC');
+    const reviews=result.reviews.filter(row=>isoDay(row.date)>=range.from&&isoDay(row.date)<=range.to);
+    return {...result,reviews,total:reviews.length,period,...range};
+  }
+  async readReplies(rows) {
+    const replied=rows.filter(row=>row.hasReply);if(!replied.length)return;
+    const {page,frame,store}=await this.workspace();
+    if(replied.some(row=>row.store!==store))throw new AppError('연결된 스토어가 변경되었습니다.',409,'STORE_CHANGED');
+    await withActiveReviewPage(page,async()=>{
+      // The official field supports comma-separated review IDs. Small batches
+      // reuse one search while still verifying every opened detail by exact ID.
+      for(let start=0;start<replied.length;start+=5) {
+        const batch=replied.slice(start,start+5);await this.reset(frame,'1y');
+        if(await frame.getByRole('combobox').filter({hasText:/^리뷰글번호$/}).count()!==1)throw new AppError('리뷰 번호 검색 항목을 찾지 못했습니다.',503,'NAVER_LAYOUT');
+        await frame.locator('textarea[placeholder^="복수 검색시"]').fill(batch.map(row=>row.id).join(','));await this.search(frame);
+        for(const row of batch) {
+          const rendered=(await frame.evaluate(readRenderedRows)).find(candidate=>candidate.id===row.id);
+          if(!rendered){const found=await this.locate(row);Object.assign(row,found.actual);await this.closeDetails(found.frame);continue;}
+          const actual={...rendered,store};assertSameReview(row,actual);
+          await frame.locator(`.ag-center-cols-container [row-id="${row.id}"] [col-id="reviewContent"] a`).click();
+          await frame.locator('textarea[placeholder^="반복적인 답글"]').waitFor();
+          try {
+            const detail=await frame.evaluate(readReviewDetail);
+            if(detail.id!==row.id)throw new AppError('열린 리뷰 번호가 다릅니다.',409,'REVIEW_CHANGED');
+            Object.assign(row,actual,detail);
+          } finally {await this.closeDetails(frame);}
+        }
+      }
     });
   }
   async locate(expected) {

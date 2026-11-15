@@ -26,6 +26,10 @@ export function coupangDateWindows(from, to) {
 }
 export function normalizeCoupangReview(raw, store) {
   if (!Number.isSafeInteger(raw.reviewId) || !Number.isSafeInteger(raw.productId) || !Number.isFinite(raw.reviewAt) || !Number.isInteger(raw.rating) || raw.rating < 1 || raw.rating > 5) throw new AppError('쿠팡 리뷰 형식이 변경되었습니다. 기존 목록을 유지합니다.', 502, 'COUPANG_LAYOUT');
+  // Wing filters by initial creation. reviewAt can move after an edit and lie
+  // outside the requested range; use the stable creation date for cache coverage.
+  const dateTimestamp=raw.firstReviewAt??raw.createdAt??raw.reviewAt;
+  if(!Number.isFinite(dateTimestamp))throw new AppError('쿠팡 리뷰 작성일을 확인하지 못했습니다.',502,'COUPANG_LAYOUT');
   let attachment; try { attachment = JSON.parse(raw.attachment || '{}'); } catch { attachment = {}; }
   const media = (Array.isArray(attachment?.imageAttachments) ? attachment.imageAttachments : []).flatMap(item => {
     const candidates = typeof item === 'string' ? [item] : Object.values(item || {}).filter(v => typeof v === 'string');
@@ -35,12 +39,13 @@ export function normalizeCoupangReview(raw, store) {
   const content = hidden ? '쿠팡에서 비공개 또는 삭제 처리된 리뷰입니다.' : [raw.reviewTitle, raw.reviewContent].filter(t => typeof t === 'string' && t.trim()).filter((t, i, values) => values.indexOf(t) === i).join('\n\n');
   const author = String(raw.memberName || '').trim();
   return { id: `coupang-${raw.reviewId}`, sourceId: String(raw.reviewId), platform: 'coupang', readOnly: true, productId: String(raw.productId), product: String(raw.itemName || '상품명 없음'), content,
-    rating: raw.rating, author: author ? `${Array.from(author)[0]}***` : '구매자', date: new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(raw.reviewAt)).replaceAll('-', '.'), dateTimestamp: raw.reviewAt,
+    rating: raw.rating, author: author ? `${Array.from(author)[0]}***` : '구매자', date: new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(dateTimestamp)).replaceAll('-', '.'), dateTimestamp,
     hasReply: false, reply: null, media: hidden ? [] : [...new Set(media)], store, status: hidden ? '비공개' : '정상', productUrl: `https://www.coupang.com/vp/products/${raw.productId}` };
 }
 
 // Reviews are read-only. Login submits only the official authentication form.
 export class CoupangConnector {
+  cacheVersion = 1;
   constructor(directory, host = new NaverConnector(directory)) { this.host = host; this.sessionProbe = null; }
   async connect() { return this.host.connect(); }
   async getPage(create = false) {
@@ -112,8 +117,9 @@ export class CoupangConnector {
     if (response.status !== 200 || response.data?.success !== true || !Array.isArray(response.data?.data?.content)) throw new AppError('쿠팡 리뷰를 조회하지 못했습니다. 연결 창의 로그인 상태를 확인한 뒤 다시 시도해 주세요. 기존 목록은 유지됩니다.', 502, 'COUPANG_SEARCH_FAILED');
     return response.data.data;
   }
-  async sync(period = '3m') {
-    const range = coupangDateRange(period), { page, store } = await this.workspace();
+  async syncRange(range,period='3m') { return this.sync(period,range); }
+  async sync(period = '3m', range = coupangDateRange(period)) {
+    const { page, store } = await this.workspace();
     const collected = new Map(); let total = 0, requests = 0, vendor = null;
     for (const window of coupangDateWindows(range.from, range.to)) {
       const windowIds = new Set(); let expected, pages;

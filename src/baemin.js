@@ -34,7 +34,9 @@ export function baeminDateWindows(from, to) {
 export async function selectBaeminDates(page, range) {
   await clickBaeminFilter(page.getByRole('radio',{name:'날짜 직접 선택',exact:true}));
   const sheet = page.getByRole('dialog').filter({has:page.getByRole('heading',{name:'기간',exact:true})});
-  const selected = sheet.getByRole('button',{name:/^\d{4}\.\s*\d+\.\s*\d+\s*~/});
+  // A collapsed range is rendered as one date, without "~". Keep the button
+  // addressable so validation can retry instead of timing out on a stale name.
+  const selected = sheet.getByRole('button',{name:/^\d{4}\.\s*\d+\.\s*\d+/});
   for (let attempt=0; attempt<2; attempt++) {
   await selected.click({timeout:5000});
   const calendar = page.getByRole('dialog').filter({has:page.getByRole('grid')});
@@ -57,7 +59,7 @@ export async function selectBaeminDates(page, range) {
   }
   await calendar.getByRole('button',{name:'적용',exact:true}).click({timeout:5000});
   await calendar.waitFor({state:'hidden'});
-  if (await waitForBaeminValue(() => selected.innerText(), text => baeminDates(text).join('/') === `${range.from}/${range.to}`, 1500)) {
+  if (await waitForBaeminValue(() => selected.innerText({timeout:2000}), text => baeminDates(text).join('/') === `${range.from}/${range.to}`, 1500)) {
     await sheet.getByRole('button',{name:'적용',exact:true}).click({timeout:5000});
     await sheet.waitFor({state:'hidden',timeout:5000});
     return;
@@ -206,15 +208,20 @@ export class BaeminConnector {
     }finally{page.off('response',observe);await Promise.all([...pending]);}
     });
   }
-  async sync(period) {
+  async syncRange(range,period='3m') {return this.sync(period,range);}
+  async sync(period,customRange) {
     this.progress={phase:'syncing',period,startedAt:new Date().toISOString(),window:1,windows:period==='1y'?2:1,rows:0,total:null,completed:0};
     try {
-    if(period!=='1y') { const result=await this.collect(period); this.progress={...this.progress,phase:'done',rows:result.total,total:result.total}; return result; }
-    const range=coupangDateRange('1y'), windows=baeminDateWindows(range.from,range.to), rows=new Map();
+    if(period!=='1y'&&!customRange) { const result=await this.collect(period); this.progress={...this.progress,phase:'done',rows:result.total,total:result.total}; return result; }
+    const range=customRange||coupangDateRange('1y'), windows=baeminDateWindows(range.from,range.to), rows=new Map();
     let store,storeName,total=0;
     for(const [index,window] of windows.entries()) {
       this.progress={...this.progress,window:index+1,windows:windows.length,...window,rows:0,total:null,completed:rows.size};
-      const result=await this.collect(period,null,window);
+      const today=coupangDateRange('1m').to;
+      const recentFrom=new Date(Date.parse(today+'T00:00:00Z')-30*86400000).toISOString().slice(0,10);
+      const recent=window.to===today&&window.from===recentFrom;
+      const result=await this.collect(recent?'1m':period,null,recent?null:window);
+      if(result.from!==window.from||result.to!==window.to)throw new AppError('배민 조회 날짜가 요청한 구간과 다릅니다.',502,'BAEMIN_DATE_RANGE');
       if(store && store!==result.store)throw new AppError('조회 중 배민 매장이 변경되었습니다.',409,'STORE_CHANGED');
       store=result.store;storeName=result.storeName;total+=result.total;
       for(const row of result.reviews) {

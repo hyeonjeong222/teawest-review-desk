@@ -1,4 +1,5 @@
 import { SerialQueue, sortReviews, reviewPlatform, AppError, collectReviews } from './core.js';
+import {commitReviewCache,selectCachedPeriod} from './review-cache.js';
 
 export class AblyReviewService {
   queue = new SerialQueue();
@@ -8,9 +9,11 @@ export class AblyReviewService {
       const result = await collectReviews(this.store, this.connector, 'ably', period, options);
       if (!Array.isArray(result.reviews) || result.reviews.length !== result.total || new Set(result.reviews.map(r => r.id)).size !== result.total || result.reviews.some(r => !/^ably-\d+$/.test(r.id))) throw new AppError('에이블리 리뷰 일부를 읽지 못했습니다. 기존 목록은 유지됩니다.', 502, 'INCOMPLETE_SYNC');
       await this.store.update(s => {
+        commitReviewCache(s,'ably',result);
         s.reviews = sortReviews([...s.reviews.filter(r => reviewPlatform(r) !== 'ably'), ...result.reviews.map(r => ({ ...r, platform: 'ably', readOnly: true }))]);
         s.lastSync = new Date().toISOString();
-        s.syncs = { ...s.syncs, ably: { ...result, reviews: undefined, lastSync: s.lastSync } };
+        s.syncs = { ...s.syncs, ably: { ...result, reviews: undefined, cacheUpdate:undefined, lastSync: s.lastSync } };
+        if(result.cacheUpdate&&s.reviewPeriod&&s.reviewPeriod!==period)selectCachedPeriod(s,'ably',s.reviewPeriod,options?.now);
       });
       return this.store.data;
     });

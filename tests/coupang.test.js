@@ -33,6 +33,8 @@ test('Coupang ranges use Korean dates and cover leap/year boundaries without gap
 });
 
 test('Coupang normalizes IDs separately, masks authors and only includes trusted public image URLs', () => {
+  const edited=normalizeCoupangReview({...raw,firstReviewAt:Date.parse('2026-10-10T13:00:00+09:00'),createdAt:Date.parse('2026-10-10T13:00:00+09:00')},'테스트');
+  assert.equal(edited.date,'2026.10.10');assert.equal(edited.dateTimestamp,Date.parse('2026-10-10T13:00:00+09:00'));
   const review = normalizeCoupangReview({ ...raw, attachment: JSON.stringify({ imageAttachments: ['https://image1.coupangcdn.com/review.jpg', { url: 'https://image1.coupangcdn.com/review.jpg' }, 'javascript:alert(1)', 'https://coupangcdn.com.evil.example/photo'] }) }, '테스트');
   assert.equal(review.id, 'coupang-123'); assert.equal(review.readOnly, true); assert.equal(review.hasReply, false);
   assert.equal(review.author, '테***'); assert.equal(JSON.stringify(review).includes(raw.memberName), false); assert.equal(review.vendorId, undefined);

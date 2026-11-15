@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { deliveryPlatforms, replyPlatforms, platformLabels } from '../public/platforms.js';
+import {collectCachedReviews,commitReviewCache,hydrateReviewCache,retainReviewArchive,selectCachedPeriod} from './review-cache.js';
 
 export class AppError extends Error {
   constructor(message, status = 400, code = 'INVALID_REQUEST') { super(message); this.status = status; this.code = code; }
@@ -44,7 +45,7 @@ export class SerialQueue {
   get busy() { return this.pending > 0; }
   run(fn) { this.pending++; const result = this.tail.then(fn, fn).finally(() => { this.pending--; }); this.tail = result.catch(() => {}); return result; }
 }
-export async function collectReviews(store, connector, platform, period, { automatic = false, shouldRun } = {}) {
+export async function collectReviews(store, connector, platform, period, { automatic = false, shouldRun, ...options } = {}) {
   if (automatic && shouldRun && !shouldRun()) throw new AppError('자동 가져오기를 중지했습니다.', 409, 'AUTO_SYNC_CANCELLED');
   const previous = store.data.syncs?.[platform] || (platform === 'naver' ? store.data.sync : null);
   // Resolve inside the service queue so a newer manual period always wins.
@@ -54,15 +55,15 @@ export async function collectReviews(store, connector, platform, period, { autom
     if (status.connected && status.store && status.store !== previous.store) throw new AppError('연결된 판매자 계정이 변경되었습니다. 스토어를 확인하고 직접 리뷰를 가져와 주세요.', 409, 'STORE_CHANGED');
   }
   if (automatic && shouldRun && !shouldRun()) throw new AppError('자동 가져오기를 중지했습니다.', 409, 'AUTO_SYNC_CANCELLED');
-  const result = await connector.sync(period);
+  const result = connector.syncRange||connector.syncChanges ? await collectCachedReviews(store,connector,platform,period||'3m',{...options,automatic}) : await connector.sync(period);
   if (automatic && previous?.store && result.store !== previous.store) throw new AppError('조회 중 판매자 계정이 변경되었습니다. 기존 리뷰를 유지합니다.', 409, 'STORE_CHANGED');
   return result;
 }
 export class Store {
   constructor(directory) { this.directory = directory; this.queue = new SerialQueue(); this.data = { reviews: [], drafts: {}, submissions: {}, lastSync: null, sync: null, syncs: {}, autoSync: { enabled: true, intervalMinutes: 10 }, settings: { brand: '티웨스트', tone: '따뜻하고 정중하게', guidance: '', model: 'gpt-5-mini' } }; }
-  async init() { await mkdir(this.directory, { recursive: true }); try { const saved = JSON.parse(await readFile(path.join(this.directory, 'state.json'), 'utf8')); this.data = { ...this.data, ...saved, settings: { ...this.data.settings, ...saved.settings } }; } catch (e) { if (e.code !== 'ENOENT') throw new Error('저장된 데이터 파일을 읽을 수 없습니다. .local/state.json을 확인해 주세요.'); } }
-  async update(fn) { return this.queue.run(async () => { const result = fn(this.data); const p = path.join(this.directory, 'state.json'); await writeFile(`${p}.tmp`, JSON.stringify(this.data, null, 2), 'utf8'); await rename(`${p}.tmp`, p); return result; }); }
-  review(id) { const r = this.data.reviews.find(r => r.id === id); if (!r) throw new AppError('리뷰를 찾을 수 없습니다. 먼저 동기화해 주세요.', 404); return r; }
+  async init() { await mkdir(this.directory, { recursive: true }); try { const saved = JSON.parse(await readFile(path.join(this.directory, 'state.json'), 'utf8')); this.data = { ...this.data, ...saved, settings: { ...this.data.settings, ...saved.settings } }; } catch (e) { if (e.code !== 'ENOENT') throw new Error('저장된 데이터 파일을 읽을 수 없습니다. .local/state.json을 확인해 주세요.'); } hydrateReviewCache(this.data); }
+  async update(fn) { return this.queue.run(async () => { const result = fn(this.data); retainReviewArchive(this.data); const p = path.join(this.directory, 'state.json'); await writeFile(`${p}.tmp`, JSON.stringify(this.data, null, 2), 'utf8'); await rename(`${p}.tmp`, p); return result; }); }
+  review(id) { const r = this.data.reviews.find(r => r.id === id) || this.data.reviewArchive?.find(r => r.id === id && !r.sourceRemovedAt && r.store === this.data.reviewCache?.[reviewPlatform(r)]?.store); if (!r) throw new AppError('리뷰를 찾을 수 없습니다. 먼저 동기화해 주세요.', 404); return r; }
 }
 
 // Publishing is reachable only from the human-confirmed POST route, never from AI generation or sync.
@@ -74,14 +75,16 @@ export class ReviewService {
       const result = await collectReviews(this.store, this.connector, this.platform, period, options);
       if (this.platform !== 'naver' && (result.reviews.length !== result.total || new Set(result.reviews.map(r => r.id)).size !== result.total || result.reviews.some(r => r.platform !== this.platform || !r.id.startsWith(`${this.platform}-`) || r.store !== result.store))) throw new AppError('매장별 리뷰 조회 결과를 확인하지 못했습니다. 기존 목록을 유지합니다.', 502, 'INCOMPLETE_SYNC');
       await this.store.update(s => {
+        commitReviewCache(s,this.platform,result);
         const previous = new Map(s.reviews.map(r => [r.id, r]));
         const incoming = result.reviews.map(r => ({ ...r, platform: this.platform, readOnly: false, reply: r.hasReply ? (r.reply ?? previous.get(r.id)?.reply ?? null) : null, fingerprint: fingerprint(r) }));
         s.reviews = sortReviews([...incoming, ...s.reviews.filter(r => reviewPlatform(r) !== this.platform)]);
         s.lastSync = new Date().toISOString();
-        const metadata = { ...result, reviews: undefined, lastSync: s.lastSync };
+        const metadata = { ...result, reviews: undefined, cacheUpdate:undefined, lastSync: s.lastSync };
         if (this.platform === 'naver') s.sync = metadata;
         s.syncs = { ...s.syncs, [this.platform]: metadata };
         for (const r of s.reviews) reconcileSubmissionRecords(s, r);
+        if(result.cacheUpdate&&s.reviewPeriod&&s.reviewPeriod!==period)selectCachedPeriod(s,this.platform,s.reviewPeriod,options?.now);
       });
       return this.store.data;
     });
@@ -89,9 +92,10 @@ export class ReviewService {
   async readAndReconcile(expected) {
     const actual = await this.connector.detail(expected); assertSameReview(expected, actual);
     await this.store.update(s => {
-      const review = s.reviews.find(r => r.id === expected.id);
-      Object.assign(review, { hasReply: actual.hasReply, reply: actual.reply, option: actual.option, detailCheckedAt: new Date().toISOString() });
-      reconcileSubmissionRecords(s, review);
+      for(const review of [...s.reviews,...s.reviewArchive].filter(r=>r.id===expected.id&&r.store===expected.store)) {
+        Object.assign(review, { hasReply: actual.hasReply, reply: actual.reply, option: actual.option, detailCheckedAt: new Date().toISOString() });
+        reconcileSubmissionRecords(s, review);
+      }
     });
     return this.store.review(expected.id);
   }
@@ -141,7 +145,7 @@ export class ReviewService {
           await this.store.update(s => { s.submissions[attemptKey] = { reviewId: id, state: 'attempting', time: new Date().toISOString() }; });
         });
         await this.store.update(s => {
-          Object.assign(s.reviews.find(r => r.id === id), { hasReply: true, reply: result.reply, repliedAt: new Date().toISOString() });
+          for(const review of [...s.reviews,...s.reviewArchive].filter(r=>r.id===id&&r.store===expected.store))Object.assign(review, { hasReply: true, reply: result.reply, repliedAt: new Date().toISOString() });
           delete s.drafts[id]; s.submissions[attemptKey] = { reviewId: id, state: 'sent', time: new Date().toISOString() };
         });
         return { success: true, review: this.store.review(id) };

@@ -92,6 +92,7 @@ test('one shared period refreshes every top store count, survives switching tabs
     if(url.pathname==='/api/session') result={csrf:'test',settings:{brand:'테스트'},aiConfigured:false};
     else if(url.pathname==='/api/status') result={connected:true,aiConfigured:false};
     else if(url.pathname==='/api/reviews') result=data;
+    else if(url.pathname==='/api/period') {data.reviewPeriod=req.postDataJSON().period;result={...data,missing:channels};}
     else if(url.pathname==='/api/sync') {
       const query=req.postDataJSON(); requests.push(query); assert.equal(query.platform,'all');
       if(requests.length===1) await hold;
@@ -132,6 +133,27 @@ test('one shared period refreshes every top store count, survives switching tabs
   await page.reload(); await page.waitForFunction(()=>document.querySelector('#period').value==='1m');
   assert.equal(await page.locator('#platform-coupangeats-besti').textContent(),'조회 필요');
   assert.deepEqual(requests.map(r=>r.period),['1m','1y','1m']); assert.deepEqual(errors,[]);
+});
+
+test('cached period switches do not fetch sellers; explicit full check is separate from incremental refresh',async t=>{
+  const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
+  const page=await browser.newPage(),requests=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
+  let data={reviews:[],drafts:{},reviewPeriod:'1y',syncs:{naver:{period:'1y',total:0}}};
+  await page.route('**/api/**',async route=>{const req=route.request(),url=new URL(req.url());let result;
+    if(url.pathname==='/api/session')result={csrf:'test',settings:{brand:'테스트'},aiConfigured:false};
+    else if(url.pathname==='/api/status')result={connected:true};
+    else if(url.pathname==='/api/reviews')result=data;
+    else if(url.pathname==='/api/period'){const period=req.postDataJSON().period;data={...data,reviewPeriod:period,syncs:{naver:{period,total:0,mode:'cache'}}};result={...data,missing:[]};}
+    else if(url.pathname==='/api/sync'){requests.push(req.postDataJSON());result={...data,warnings:[]};}
+    else assert.fail(url.pathname);
+    await route.fulfill({contentType:'application/json',body:JSON.stringify(result)});
+  });
+  await page.goto(appUrl);await page.waitForFunction(()=>document.querySelector('#period').value==='1y');
+  await page.locator('#period').selectOption('1m');await page.waitForFunction(()=>document.querySelector('#period-status').textContent.includes('저장된 목록'));
+  await page.locator('#period').selectOption('1y');await page.waitForFunction(()=>!document.querySelector('#period').disabled);assert.equal(requests.length,0);
+  await page.locator('#sync-button').click();await page.waitForFunction(()=>!document.querySelector('#sync-button').disabled);
+  await page.locator('#sync-full-button').click();await page.waitForFunction(()=>!document.querySelector('#sync-full-button').disabled);
+  assert.deepEqual(requests.map(r=>r.full),[false,true]);assert.deepEqual(errors,[]);
 });
 
 test('connection settings align across five providers and support password-only updates and delivery re-login', async t => {
@@ -270,7 +292,7 @@ test('browser: Ably tab shows satisfaction without stars, filters independently,
   await page.locator('#rating-filter').selectOption('unsatisfied'); assert.equal(await page.locator('.review-card').count(), 1);
   await page.locator('#rating-filter').selectOption('satisfied'); assert.equal(await page.locator('.review-card').count(), 1);
   await page.locator('#ably-connect-button').click(); await page.locator('#ably-connection-banner').waitFor({ state: 'hidden' }); assert.deepEqual(calls[0], { platform: 'ably' });
-  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(calls[1], { platform: 'all', period: '3m' });
+  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(calls[1], { platform: 'all', period: '3m', full:false });
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.locator('.platform-tabs [data-platform="naver"]').click(); assert.equal(await page.locator('#rating-filter').inputValue(), 'all'); assert.equal(await page.locator('#reply-editor').inputValue(), '보존할 초안입니다.');
   await page.locator('.platform-tabs [data-platform="coupang"]').click(); assert.equal(await page.locator('.review-card').count(), 1);
@@ -378,7 +400,7 @@ test('browser: mixed-platform filters, read-only Coupang detail, Naver-only repl
   await page.locator('#search').fill('네이버 상품'); await page.locator('#rating-filter').selectOption('5');
   await page.locator('.platform-tabs [data-platform="coupang"]').click(); assert.equal(await page.locator('.review-card').count(), 1);
   assert.equal(await page.locator('#search').inputValue(), ''); assert.equal(await page.locator('#rating-filter').inputValue(), 'all');
-  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(refreshes, [{ period: '6m', platform: 'all' }]);
+  await page.locator('#sync-button').click(); await page.waitForFunction(() => !document.querySelector('#sync-button').disabled); assert.deepEqual(refreshes, [{ period: '6m', platform: 'all', full:false }]);
   await page.locator('#coupang-detail-open').click(); await page.waitForResponse(r => new URL(r.url()).pathname === '/api/status'); assert.deepEqual(opens, ['coupang']);
   await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.locator('.platform-tabs [data-platform="naver"]').click(); assert.equal(await page.locator('.review-card').count(), 2); assert.equal(await page.locator('#period').inputValue(), '6m');

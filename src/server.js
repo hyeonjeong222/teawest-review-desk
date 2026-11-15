@@ -22,6 +22,7 @@ import { reviewPlatform, replyLimit } from './core.js';
 import { CredentialTransfer, recoverCredentialTransfer } from './credential-transfer.js';
 import { dataDirectory } from './data-directory.js';
 import { AppUpdater } from './app-update.js';
+import {selectCachedPeriod} from './review-cache.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appVersion = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
@@ -156,17 +157,25 @@ export async function createApp({ directory = dataDirectory(), connector, coupan
           if (action === 'forget') return json(res, 200, await auth.forget());
           return json(res, 200, await deliveryQueues[provider].run(() => deliveryAccounts[provider].open()));
         }
+        if(route==='/api/period') {
+          if(!['1m','3m','6m','1y'].includes(data.period))throw new AppError('지원하지 않는 조회 기간입니다.');
+          const missing=[];
+          await store.update(s=>{s.reviewPeriod=data.period;for(const id of platforms)if(!selectCachedPeriod(s,id,data.period))missing.push(id);});
+          return json(res,200,{...reviewState(),missing});
+        }
         if (route === '/api/sync') {
           const platform = data.platform || 'naver', period = data.period || '3m';
+          if(data.full!==undefined&&typeof data.full!=='boolean')throw new AppError('전체 확인 설정이 올바르지 않습니다.');
+          const options={full:data.full===true};
           if (![...platforms, 'all'].includes(platform)) throw new AppError('지원하지 않는 스토어입니다.');
           if (!['1m', '3m', '6m', '1y'].includes(period)) throw new AppError('지원하지 않는 조회 기간입니다.');
-          if (deliveryPlatforms[platform]) await sources[platform].service.sync(period);
-          if (platform === 'naver') await service.sync(period);
-          if (platform === 'coupang') await coupangService.sync(period);
-          if (platform === 'ably') await ablyService.sync(period);
+          if (deliveryPlatforms[platform]) await sources[platform].service.sync(period,options);
+          if (platform === 'naver') await service.sync(period,options);
+          if (platform === 'coupang') await coupangService.sync(period,options);
+          if (platform === 'ably') await ablyService.sync(period,options);
           if (platform === 'all') {
             await store.update(s => { s.reviewPeriod = period; });
-            const results = await Promise.allSettled(platforms.map(id => sources[id].service.sync(effectiveReviewPeriod(id, period))));
+            const results = await Promise.allSettled(platforms.map(id => sources[id].service.sync(effectiveReviewPeriod(id, period),options)));
             if (results[0].status === 'rejected' && results[0].reason.code === 'LOGIN_REQUIRED') void autoLogin.schedule();
             if (results[1].status === 'rejected' && results[1].reason.code === 'COUPANG_LOGIN_REQUIRED') void coupangAutoLogin.schedule();
             if (results[2].status === 'rejected' && results[2].reason.code === 'ABLY_LOGIN_REQUIRED') void ablyAutoLogin.schedule();

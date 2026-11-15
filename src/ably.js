@@ -2,6 +2,7 @@ import { NaverConnector } from './naver.js';
 import { AppError } from './core.js';
 import { coupangDateRange } from './coupang.js';
 import { loginAblyWithCredentials } from './ably-login.js';
+import {createHash} from 'node:crypto';
 
 export const ABLY_REVIEW_URL = 'https://my.a-bly.com/reviews';
 const API_URL = 'https://api.a-bly.com/seller/reviews/';
@@ -119,5 +120,34 @@ export class AblyConnector {
     const reviews = [...collected.values()].filter(r => { const day = r.date.slice(0, 10).replaceAll('.', '-'); return day >= range.from && day <= range.to; });
     this.probe = { store: session.store, at: Date.now() };
     return { reviews, total: reviews.length, sourceTotal, store: session.store, period, ...range, readOnly: true };
+  }
+  async syncChanges(period,{checkpoint,sourceTotal:previousTotal,knownIds=new Set(),full=false,now=new Date()}={}) {
+    const session=await this.workspace(),rows=new Map(),signatures=[],anchors=checkpoint?.anchors||[];
+    const signature=row=>createHash('sha256').update(JSON.stringify(row)).digest('hex');
+    let sourceTotal,head,complete=false;
+    for(let index=1;index<=300;index++) {
+      const data=await this.fetchPage(session,index);sourceTotal??=data.total_count;
+      if(data.total_count!==sourceTotal)throw new AppError('조회 중 에이블리 리뷰 수가 변경되었습니다. 다시 확인해 주세요.',409,'ABLY_CHANGED');
+      if(data.reviews.length!==Math.min(PAGE_SIZE,sourceTotal-(index-1)*PAGE_SIZE))throw new AppError('에이블리 리뷰 일부를 읽지 못했습니다.',502,'INCOMPLETE_SYNC');
+      const normalized=data.reviews.map(raw=>normalizeAblyReview(raw,session.store));
+      if(index===1)head=normalized.map(signature);
+      for(const row of normalized){if(rows.has(row.id))throw layoutError();rows.set(row.id,row);signatures.push(signature(row));}
+      if(rows.size===sourceTotal){complete=true;break;}
+      // LATEST is modification order. Stop only after the previous unchanged head
+      // boundary, with the source count accounting for every new ID. Deletions,
+      // replaced anchors or uncertain ordering fall back to a complete scan.
+      if(!full&&anchors.length&&Number.isSafeInteger(previousTotal)&&sourceTotal>=previousTotal) {
+        const boundary=signatures.some((_,i)=>anchors.every((hash,j)=>signatures[i+j]===hash));
+        const added=[...rows.keys()].filter(id=>!knownIds.has(id)).length;
+        if(boundary&&added===sourceTotal-previousTotal)break;
+      }
+      if(index===300)throw new AppError('에이블리 전체 리뷰가 너무 많아 조회를 중단했습니다.',422,'ABLY_PAGE_LIMIT');
+      await new Promise(resolve=>setTimeout(resolve,150));
+    }
+    const check=await this.fetchPage(session,1);
+    if(check.total_count!==sourceTotal||JSON.stringify(check.reviews.map(raw=>signature(normalizeAblyReview(raw,session.store))))!==JSON.stringify(head))throw new AppError('조회 중 에이블리 리뷰 순서가 변경되었습니다. 다시 확인해 주세요.',409,'ABLY_CHANGED');
+    if(await this.storeName(session.page)!==session.store)throw new AppError('에이블리 판매자 계정이 변경되었습니다.',409,'STORE_CHANGED');
+    this.probe={store:session.store,at:Date.now()};
+    return {reviews:[...rows.values()],total:rows.size,store:session.store,period,from:'1970-01-01',to:coupangDateRange(period,now).to,patchOnly:!complete,sourceTotal,checkpoint:{anchors:head.slice(-5)},readOnly:true};
   }
 }

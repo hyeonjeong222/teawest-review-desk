@@ -60,8 +60,9 @@ export class EatsConnector{
   }
   throw new AppError('쿠팡이츠 리뷰를 모두 읽지 못했습니다. 기존 목록은 유지됩니다.',502,'INCOMPLETE_SYNC');
  }
- async sync(period='3m'){
-  const {page,shop}=await this.workspace(),{from,to}=coupangDateRange(period),rows=new Map();
+ async syncRange(range,period='3m'){return this.sync(period,range);}
+ async sync(period='3m',range=coupangDateRange(period)){
+  const {page,shop}=await this.workspace(),{from,to}=range,rows=new Map();
   for(const window of coupangDateWindows(from,to)){
    // The portal's end date is inclusive despite the parameter name.
    const result=await this.range(page,shop,window.from,window.to);

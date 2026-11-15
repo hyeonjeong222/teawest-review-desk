@@ -64,6 +64,21 @@ test('Naver read-only filter controls work outside frame viewport coordinates an
   assert.equal(await page.evaluate(() => window.submits), 0);
 });
 
+test('Naver reply refresh batches review searches and reads same-day text changes without posting',async t=>{
+  const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
+  const page=await browser.newPage();await page.setContent(fixture);
+  await page.evaluate(()=>{
+    window.saved='외부에서 수정한 답글';window.searches=0;document.querySelector('#search').onclick=()=>window.searches++;
+    document.querySelector('#status').textContent='Y';const first=document.querySelector('.ag-center-cols-container > div'),second=first.cloneNode(true);
+    second.setAttribute('row-id','1234567891');second.querySelector('[col-id="id"]').textContent='1234567891';
+    second.querySelector('a').id='second';second.querySelector('a').onclick=()=>{openDetail();document.querySelector('#popup p').textContent='리뷰 글번호 1234567891';};first.after(second);
+  });
+  const connector=new NaverConnector('unused');connector.workspace=async()=>({page,frame:page.mainFrame(),store:'테스트 스토어'});
+  const rows=['1234567890','1234567891'].map(id=>({id,productId:'4321',product:'쿠키도우',rating:5,content:'정말 맛있어요.',store:'테스트 스토어',hasReply:true,reply:'예전 답글'}));
+  await connector.readReplies(rows);assert.ok(rows.every(row=>row.reply==='외부에서 수정한 답글'));
+  assert.equal(await page.evaluate(()=>window.searches),1);assert.equal(await page.evaluate(()=>window.submits),0);assert.equal(await page.locator('#popup textarea').count(),0);
+});
+
 test('Naver adapter: exact-review posting, saved-text read-back, and duplicate guard on an isolated seller UI fixture', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage();

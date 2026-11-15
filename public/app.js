@@ -136,7 +136,8 @@ function renderPeriodControls() {
   const platform = state.platform, info = syncInfo(platform), request = state.syncRequest;
   const period = selectedPeriod(); $('#period').value = period;
   $('#period').disabled = state.syncing || state.publishing;
-  const applied = info ? `${platformLabel(platform)} · ${periodLabels[info.period] || '조회 기간'} · ${platformReviews().length}개` : `${platformLabel(platform)} · 가져온 리뷰 없음`;
+  $('#sync-full-button').disabled = $('#sync-button').disabled = state.syncing || state.publishing;
+  const applied = info ? `${platformLabel(platform)} · ${periodLabels[info.period] || '조회 기간'} · ${platformReviews().length}개${info.mode==='cache'?' · 저장된 목록':''}` : `${platformLabel(platform)} · 가져온 리뷰 없음`;
   const limit = period === '1y' && request ? ' 배민은 기간을 나누어 1년치를 조회합니다.' : '';
   const progress = Object.entries(state.syncProgress).filter(([,job])=>job.phase==='syncing' && job.period===period).map(([id,job])=>`${platformLabel(id)} ${job.window}/${job.windows}구간 · ${job.rows}${job.total===null?'':`/${job.total}`}개 읽음`).join(' / ');
   $('#period-status').textContent = request
@@ -521,14 +522,29 @@ async function openBrowser(platform = 'naver') {
   const label = platformLabel(platform);
   try { toast(`${label} 연결 창을 여는 중입니다.`); await api('/api/browser/open', { platform }); await refreshStatus(); const connected = platform === 'naver' ? state.connected : state.platforms[platform]?.connected; toast(connected ? `${label} 연결이 완료되었습니다. 리뷰를 가져와 주세요.` : `새로 열린 ${label} 창에서 로그인과 추가 인증을 완료해 주세요.`); } catch (e) { toast(e.message, true); }
 }
-async function sync() {
+async function changePeriod() {
+  if(state.syncing||state.publishing)return;
+  const period=$('#period').value;let missing=[];
+  state.syncing=true;renderPeriodControls();
+  try {
+    await Promise.all([...state.saveTimers.keys()].map(id=>saveDraft(id)));
+    const result=await api('/api/period',{period});
+    Object.assign(state,result,{drafts:{...result.drafts,...state.drafts}});state.syncErrors={};reviewRevision++;
+    const rows=filtered();if(!rows.some(row=>row.id===state.selected))state.selected=rows[0]?.id||null;
+    missing=result.missing||[];renderStats();renderList();renderDetail();
+    if(!missing.length)toast('저장된 리뷰에서 선택한 기간을 바로 표시했습니다.');
+  } catch(error){toast(error.message,true);}
+  finally {state.syncing=false;renderPeriodControls();}
+  if(missing.length)await sync();
+}
+async function sync({full=false}={}) {
   if (state.syncing || state.publishing) return;
   const period = $('#period').value;
   state.syncing = true; state.reviewPeriod = period; state.syncRequest = { period, baselines: Object.fromEntries(platforms.map(p => [p, syncInfo(p)?.lastSync])) }; state.syncErrors = {}; reviewRevision++; renderStats();
   $('#sync-button').disabled = true; $('#sync-button').classList.add('busy'); $('#sync-button').lastElementChild.textContent = '리뷰 가져오는 중';
   try {
     await Promise.all([...state.saveTimers.keys()].map(id => state.reviews.find(r => r.id === id)?.hasReply ? Promise.resolve() : saveDraft(id)));
-    const result = await api('/api/sync', { period, platform: 'all' });
+    const result = await api('/api/sync', { period, platform: 'all', full });
     Object.assign(state, result, { drafts: { ...result.drafts, ...state.drafts } }); reviewRevision++;
     for (const warning of result.warnings || []) state.syncErrors[warning.platform] = { message: warning.message, lastSync: syncInfo(warning.platform)?.lastSync };
     for (const review of state.reviews) if (review.hasReply) applyReviewUpdate(review);
@@ -536,7 +552,7 @@ async function sync() {
     renderStats(); renderList(); renderDetail(); await refreshStatus();
     toast(result.warnings?.length ? `일부 스토어 조회 실패: ${result.warnings.map(w => platformLabel(w.platform)).join(', ')}. 나머지 숫자는 선택한 기간으로 갱신했습니다.` : `전체 스토어의 ${periodLabels[period]} 리뷰 수를 갱신했습니다.`, Boolean(result.warnings?.length));
   } catch (e) { for (const platform of platforms) state.syncErrors[platform] = { message: e.message, lastSync: syncInfo(platform)?.lastSync }; toast(e.message, true); await refreshStatus(); }
-  finally { state.syncing = false; state.syncRequest = null; renderStats(); $('#sync-button').disabled = false; $('#sync-button').classList.remove('busy'); $('#sync-button').lastElementChild.textContent = '전체 스토어 새로고침'; }
+  finally { state.syncing = false; state.syncRequest = null; renderStats(); $('#sync-button').disabled = false; $('#sync-button').classList.remove('busy'); $('#sync-button').lastElementChild.textContent = '새 리뷰·답글 갱신'; }
 }
 function openSettings() {
   state.settingsPlatform = deliveryPlatforms[state.platform] ? state.platform : undefined;
@@ -663,7 +679,8 @@ $('#publish-dialog').addEventListener('close', () => { if (!state.publishing) st
 $('#search').addEventListener('input', event => { state.query = event.target.value; renderList(); });
 $('#rating-filter').addEventListener('change', event => { state.rating = event.target.value; renderList(); });
 $('#sync-button').addEventListener('click', sync); $('#connect-button').addEventListener('click', openBrowser);
-$('#period').addEventListener('change', sync);
+$('#period').addEventListener('change', changePeriod);
+$('#sync-full-button').addEventListener('click',()=>sync({full:true}));
 $('#auto-sync-enabled').addEventListener('change', saveAutoSync); $('#auto-sync-interval').addEventListener('change', saveAutoSync);
 for (const id of ['coupang-open', 'coupang-connect-button']) $(`#${id}`).addEventListener('click', () => openBrowser('coupang'));
 for (const id of ['ably-open', 'ably-connect-button']) $(`#${id}`).addEventListener('click', () => openBrowser('ably'));
