@@ -36,6 +36,9 @@ try {
   }
   const ai = { configured: false, configure() { this.configured = true; } };
   const key = new APIKeyVault(path.join(legacy, '.local'), ai); await key.save('sk-synthetic-test-key-not-a-real-key'); names.push('openai-key.json', 'state.json');
+  for (const file of ['inquiries.json', 'coupang-inquiries.json', 'ably-inquiries.json']) {
+    await writeFile(path.join(legacy, '.local', file), JSON.stringify({ version: 1, records: {}, drafts: { fixture: { text: 'keep the inquiry draft' } }, attempts: {}, completions: {} })); names.push(file);
+  }
   const original = Object.fromEntries(await Promise.all(names.map(async name => [name, await readFile(path.join(legacy, '.local', name))])));
   const install = () => run(installer, ['--test-install', root, '--legacy', legacy, '--port', String(port)], { windowsHide: true, timeout: 180000 });
   console.log('Installing into an isolated temp folder and migrating synthetic credentials…');
@@ -48,6 +51,9 @@ try {
   launched = true;
   const result = await new Promise((resolve, reject) => { const timer = setTimeout(() => { launcher.kill(); reject(new Error('Launcher timeout')); }, 45000); launcher.once('error', reject); launcher.once('exit', code => { clearTimeout(timer); resolve(code); }); }); assert.equal(result, 0);
   const session = await fetch(origin + '/api/session').then(r => r.json()); assert.equal(session.aiConfigured, true); assert.equal(session.aiKey.saved, true); assert.equal(session.app.installed, true);
+  assert.equal(session.app.version, expectedVersion); assert.equal(session.capabilities.inquiryAlerts, true);
+  assert.match(await fetch(origin + '/').then(r => r.text()), /id="inquiry-alerts"/);
+  assert.match(await fetch(origin + '/inquiry-alerts.js').then(r => r.text()), /export function createInquiryAlerts/);
   const info = await fetch(origin + '/api/app/info').then(r => r.json()); assert.equal(info.dataDirectory.toLowerCase(), data.toLowerCase());
   // Simulate updating a previous installed version while it is running.
   await writeFile(path.join(root, 'current.json'), JSON.stringify({ ...current, version: '1.0.0' }));
@@ -60,7 +66,7 @@ try {
   }
   await writeFile(path.join(root, 'current.json'), JSON.stringify({ ...current, version: '9.0.0' }));
   await assert.rejects(install()); assert.equal(JSON.parse(await readFile(path.join(root, 'current.json'), 'utf8')).version, '9.0.0');
-  console.log(JSON.stringify({ installed: true, desktopShortcut: true, startMenuShortcut: true, nativeLauncher: true, samePCMigration: true, encryptedAccountsPreserved: 5, apiKeyPreserved: true, draftsPreserved: true, gracefulRestart: true, downgradeRejected: true }));
+  console.log(JSON.stringify({ installed: true, desktopShortcut: true, startMenuShortcut: true, nativeLauncher: true, samePCMigration: true, encryptedAccountsPreserved: 5, apiKeyPreserved: true, draftsPreserved: true, inquiryFilesPreserved: 3, inquiryAlertsAvailable: true, gracefulRestart: true, downgradeRejected: true }));
 } catch (error) {
   let detail; try { detail = await readFile(path.join(root, 'test-error.txt'), 'utf8'); } catch {}
   if (detail) console.error(detail);

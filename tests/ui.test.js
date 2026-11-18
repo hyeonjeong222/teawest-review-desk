@@ -12,7 +12,7 @@ async function openConnectionSettings(page) {
 }
 before(async () => {
   uiServer = http.createServer(async (req, res) => {
-    const files = { '/': 'index.html', '/app.js': 'app.js', '/inquiries.js': 'inquiries.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
+    const files = { '/': 'index.html', '/app.js': 'app.js', '/inquiries.js': 'inquiries.js', '/inquiry-alerts.js': 'inquiry-alerts.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
     const name = files[new URL(req.url, 'http://localhost').pathname];
     if (!name) { res.writeHead(404).end(); return; }
     const content = await readFile(new URL(`../public/${name}`, import.meta.url));
@@ -21,6 +21,67 @@ before(async () => {
   uiServer.listen(0, '127.0.0.1'); await once(uiServer, 'listening'); appUrl = `http://127.0.0.1:${uiServer.address().port}`;
 });
 after(async () => { uiServer.closeAllConnections(); await new Promise(resolve => uiServer.close(resolve)); });
+
+test('inquiry alerts stay below workspace tabs, monitor all stores while reviewing and open the first pending conversation', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), errors = [], calls = [], drafts = new Map();
+  await page.clock.install(); page.on('pageerror', e => errors.push(e.message));
+  const categories = { naver: ['talktalk', 'customer', 'product', 'center'], coupang: ['center', 'customer'], ably: ['goods', 'order_before_delivery', 'order_after_delivery', 'order_etc', 'etc', 'place', 'affiliate_sponsorship'] };
+  let reviewDraft = '', arrived = false, coupangFailed = false;
+  const rows = Object.fromEntries(['naver', 'coupang', 'ably'].map((platform, index) => [platform, { id: String(index + 1).repeat(64), category: platform === 'naver' ? 'product' : platform === 'coupang' ? 'customer' : 'order_after_delivery', store: platform + ' 테스트', title: platform + ' 새 문의', author: '고객', content: '배송 상태를 확인하고 싶어요.', date: '2026-11-18', status: 'pending', canReply: true, fingerprint: platform, replyLimit: 1000, messages: [{ id: '1', role: 'customer', text: platform + ' 고객의 질문' }] }]));
+  await page.route('**/api/**', async route => {
+    const req = route.request(), pathname = new URL(req.url()).pathname, data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {}, status = 200;
+    if (pathname === '/api/session') result = { csrf: 'fixture', settings: {}, capabilities: { inquiryAlerts: true } };
+    else if (pathname === '/api/status') result = { connected: true };
+    else if (pathname === '/api/reviews') result = { reviews: [{ id: 'review-test', product: '리뷰 상품', content: '구매 후기입니다.', author: '고객', date: '2026-11-18', rating: 5, hasReply: false }], drafts: reviewDraft ? { 'review-test': { text: reviewDraft } } : {} };
+    else if (pathname === '/api/reviews/review-test/draft') { reviewDraft = data.text; result = { saved: true }; }
+    else if (pathname.startsWith('/api/inquiries/')) {
+      const [, , , platform, id, action] = pathname.split('/'), row = rows[platform]; calls.push({ platform, id, action });
+      if (id === 'sync') {
+        if (platform === 'coupang' && coupangFailed) { status = 409; result = { error: '쿠팡 로그인을 다시 확인해 주세요.', code: 'COUPANG_LOGIN_REQUIRED' }; }
+        else result = { store: row.store, checkedAt: new Date().toISOString(), targetDay: platform === 'coupang' ? 30 : undefined, items: categories[platform].map(id => ({ id, count: arrived && row.status === 'pending' && id === row.category ? 1 : 0 })) };
+      } else if (id === 'list') result = { store: row.store, checkedAt: new Date().toISOString(), records: [{ ...row, id: '0'.repeat(64), status: 'answered', canReply: false, title: '이전 답변 완료 문의' }, row] };
+      else if (action === 'detail') { assert.equal(id, row.id); result = { ...row, draft: drafts.get(platform) || '' }; }
+      else if (action === 'draft') { drafts.set(platform, data.text); result = { saved: true }; }
+      else if (action === 'prepare') result = { token: 'fixture', text: data.text, inquiry: row };
+      else if (action === 'publish') { row.status = 'answered'; row.canReply = false; result = { sent: true, inquiry: row }; }
+      else assert.fail(pathname);
+    } else assert.fail(pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl); await page.locator('#inquiry-alert-total').getByText('모두 확인했어요').waitFor();
+  assert.equal(await page.evaluate(() => document.querySelector('.workspace-tabs').nextElementSibling.id), 'inquiry-alerts');
+  assert.equal(await page.locator('#review-workspace').isVisible(), true);
+  await page.locator('#reply-editor').fill('리뷰에 작성 중인 답변');
+  arrived = true; await page.clock.fastForward(30000); await page.locator('#inquiry-alert-total').getByText('3건', { exact: true }).waitFor();
+  assert.equal(await page.locator('#reply-editor').inputValue(), '리뷰에 작성 중인 답변');
+  assert.equal(await page.locator('.inquiry-alert-category').count(), 3);
+  await page.locator('#inquiry-alerts').screenshot({ path: '.local/inquiry-alerts-desktop.png' });
+  for (const platform of ['naver', 'coupang', 'ably']) {
+    await page.locator(`.inquiry-alert-category[data-alert-platform="${platform}"]`).click();
+    const prefix = platform === 'naver' ? '' : platform + '-';
+    await page.locator(`#${prefix}inbox-detail .inbox-messages`).getByText(platform + ' 고객의 질문', { exact: true }).waitFor();
+    assert.equal(await page.locator(`#${prefix}inbox-status`).inputValue(), 'pending');
+    assert.equal(await page.locator(`#${prefix}inbox-list [data-inbox-id]`).count(), 1);
+    assert.equal(await page.locator('#inquiry-alerts').isVisible(), true);
+    await page.locator(`#${prefix}inbox-reply`).fill(platform + ' 작성 중');
+  }
+  await page.locator('#review-workspace-tab').click(); assert.equal(await page.locator('#reply-editor').inputValue(), '리뷰에 작성 중인 답변');
+  coupangFailed = true; await page.locator('#inquiry-alert-refresh').click(); await page.locator('[data-alert-card="coupang"] [data-alert-status]').getByText('연결 확인 필요').waitFor();
+  assert.equal(await page.locator('[data-alert-card="coupang"] [data-alert-count]').innerText(), '—');
+  assert.equal(await page.locator('#inquiry-alert-total').innerText(), '확인된 문의 2건');
+  coupangFailed = false; await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await page.locator('#inquiry-alert-total').getByText('3건', { exact: true }).waitFor();
+  await page.locator('.inquiry-alert-category[data-alert-platform="naver"]').click(); await page.locator('#inbox-reply').waitFor();
+  assert.equal(await page.locator('#inbox-reply').inputValue(), 'naver 작성 중');
+  await page.locator('#inbox-prepare').click(); await page.locator('#inbox-confirm-send').click(); await page.locator('[data-alert-card="naver"] [data-alert-count]').getByText('0', { exact: true }).waitFor();
+  assert.equal(await page.locator('#inquiry-alert-total').innerText(), '2건');
+  await page.locator('#review-workspace-tab').click(); await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.locator('#inquiry-alerts').screenshot({ path: '.local/inquiry-alerts-mobile.png' });
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  const syncs = calls.filter(c => c.id === 'sync').length; await page.clock.fastForward(30000); assert.equal(calls.filter(c => c.id === 'sync').length, syncs);
+  assert.deepEqual(errors, []);
+});
 
 test('Naver inquiry refresh updates counts and lists on a timer and focus without replacing the draft editor', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());

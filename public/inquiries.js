@@ -132,20 +132,21 @@ export function createInquiryInbox({ api, toast, onSent, aiConfigured = () => fa
     } catch (e) { if (generation === state.detailGeneration) error(e.message); }
     finally { if (generation === state.detailGeneration) { state.detailLoading = false; renderList(); renderDetail(); if (isAbly && state.detail && !root.closest('[hidden]') && window.innerWidth <= 1000) $('#inbox-detail').scrollIntoView({ behavior: 'smooth', block: 'start' }); } }
   }
-  async function open(category) {
+  async function open(category, { status, selectFirst = false } = {}) {
     if (!labels[category] || state.busy) return;
     root.hidden = false;
     if (state.selected) void save(state.selected).catch(() => {});
     const changed = category !== state.category, generation = ++state.generation;
     ++state.detailGeneration; state.detailLoading = false; state.loading = true; state.category = category;
     if (changed) { state.records = []; state.detail = null; state.selected = null; state.checkedAt = ''; state.store = ''; $('#inbox-search').value = ''; }
+    if (status && ['all', 'pending', 'answered', 'draft', 'closed'].includes(status)) { $('#inbox-status').value = status; $('#inbox-search').value = ''; }
     error();
     for (const button of document.querySelectorAll(`[data-${prefix}inquiry-category]`)) { const active = button.getAttribute(`data-${prefix}inquiry-category`) === category; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); }
     renderList(); renderDetail();
     try {
       const result = await api(`/api/inquiries/${platform}/list`, { category, period: state.period }); if (generation !== state.generation) return;
       state.records = result.records; state.store = result.store; state.checkedAt = result.checkedAt;
-      const selected = result.records.find(r => r.id === state.selected)?.id || (isAbly ? result.records[0]?.id : null);
+      const selected = selectFirst ? result.records.find(r => !status || status === 'all' || r.status === status)?.id : result.records.find(r => r.id === state.selected)?.id || (isAbly ? result.records[0]?.id : null);
       state.detail = null; state.selected = null;
       if (selected) void select(selected);
     } catch (e) { if (generation === state.generation) { if (e.code === 'STORE_CHANGED') { state.records = []; state.detail = null; state.selected = null; } error(e.message + (state.records.length ? ' 이전 조회 내용을 표시합니다.' : '')); } }

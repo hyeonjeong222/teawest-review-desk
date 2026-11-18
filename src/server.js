@@ -100,7 +100,7 @@ export async function createApp({ directory = dataDirectory(), connector, inquir
     try {
       if (!origins.has(`http://${req.headers.host}`)) throw new AppError('허용되지 않은 호스트입니다.', 403);
       const url = new URL(req.url, `http://${req.headers.host}`); const route = url.pathname;
-      if (req.method === 'GET' && route === '/api/session') return json(res, 200, { csrf, settings: store.data.settings, autoSync: autoSync.publicState(), app: { version: appVersion, installed: process.env.REVIEW_DESK_INSTALLED === '1' }, ...aiState() });
+      if (req.method === 'GET' && route === '/api/session') return json(res, 200, { csrf, settings: store.data.settings, autoSync: autoSync.publicState(), capabilities: { inquiryAlerts: true }, app: { version: appVersion, installed: process.env.REVIEW_DESK_INSTALLED === '1' }, ...aiState() });
       if (req.method === 'GET' && route === '/api/app/info') return json(res, 200, { app: 'teawest-review-desk', version: appVersion, root, dataDirectory: directory, pid: process.pid, installed: process.env.REVIEW_DESK_INSTALLED === '1', shuttingDown });
       if (req.method === 'GET' && route === '/api/app/update') return json(res, 200, updater.publicState());
       if (req.method === 'GET' && route === '/api/status') {
@@ -255,7 +255,7 @@ export async function createApp({ directory = dataDirectory(), connector, inquir
         }
         throw new AppError('요청한 기능을 찾을 수 없습니다.', 404);
       }
-      const files = { '/': 'index.html', '/app.js': 'app.js', '/inquiries.js': 'inquiries.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
+      const files = { '/': 'index.html', '/app.js': 'app.js', '/inquiries.js': 'inquiries.js', '/inquiry-alerts.js': 'inquiry-alerts.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
       if (req.method !== 'GET' || !files[route]) throw new AppError('페이지를 찾을 수 없습니다.', 404);
       const contents = await readFile(path.join(root, 'public', files[route]));
       const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml' };

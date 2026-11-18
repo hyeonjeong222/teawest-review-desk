@@ -111,6 +111,40 @@ body[data-workspace="inquiries"] .inquiry-sidebar { display:block; }
 .inbox-message.seller { background:#eff7f1; border-color:#d8e9dc; align-self:flex-end; }
 .inbox-message header { display:flex; justify-content:space-between; gap:16px; font-size:11px; }
 .inbox-message p { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.85; margin:10px 0 0; }
+.inquiry-alerts { margin:0 0 28px; padding:19px 22px 13px; background:#fff; border:1px solid var(--line); border-radius:12px; }
+.inquiry-alerts.has-inquiries { border-color:#b8d5c3; box-shadow:0 3px 14px #244d3510; }
+.inquiry-alert-header { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:15px; }
+.inquiry-alert-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.inquiry-alert-heading>span:first-child { display:flex; color:var(--green); }
+.inquiry-alert-heading svg { width:19px; height:19px; }
+.inquiry-alert-heading h2 { margin:0; font-size:15px; }
+#inquiry-alert-total { padding:3px 8px; border-radius:5px; background:#f2f5f3; color:#718077; font-size:11px; font-weight:600; }
+.has-inquiries>#inquiry-alert-total,.inquiry-alerts.has-inquiries #inquiry-alert-total { background:#e7f3eb; color:#236844; }
+#inquiry-alert-description { margin:7px 0 0; color:#7b887f; font-size:11px; line-height:1.6; }
+#inquiry-alert-refresh { flex-shrink:0; display:flex; align-items:center; gap:5px; font-size:11px; }
+#inquiry-alert-refresh svg { width:14px; height:14px; }
+.inquiry-alert-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.inquiry-alert-card { border:1px solid #e8eee9; border-radius:9px; min-width:0; background:#fbfcfb; }
+.inquiry-alert-card.has-inquiries { background:#f6faf7; border-color:#c4dccd; }
+.inquiry-alert-card.has-error { border-color:#eaded1; }
+.inquiry-alert-store { display:flex; width:100%; align-items:center; gap:10px; padding:13px; border:0; border-radius:9px; background:none; text-align:left; color:inherit; }
+.inquiry-alert-store:hover { background:#edf4ef; }
+.inquiry-alert-mark { width:29px; height:29px; border-radius:8px; display:grid; place-items:center; color:white; font-size:16px; font-weight:750; flex-shrink:0; }
+.inquiry-alert-mark.naver { background:#03c75a; }.inquiry-alert-mark.coupang { background:#2796b5; }.inquiry-alert-mark.ably { background:#f36b94; }
+.inquiry-alert-name { font-size:12px; font-weight:650; min-width:0; }
+.inquiry-alert-name small { display:block; margin-top:4px; color:#86938b; font-size:10px; font-weight:400; }
+.has-error .inquiry-alert-name small { color:#af7343; }
+.inquiry-alert-store>strong { margin-left:auto; font-size:23px; font-weight:650; color:#66796b; font-variant-numeric:tabular-nums; }
+.has-inquiries>.inquiry-alert-store>strong { color:#226947; }
+.inquiry-alert-arrow { color:#9aaba0; font-size:19px; }
+.inquiry-alert-categories { display:flex; flex-wrap:wrap; gap:6px; padding:0 12px 12px; }
+.inquiry-alert-categories:empty { display:none; }
+.inquiry-alert-category { display:inline-flex; align-items:center; gap:6px; max-width:100%; border:1px solid #d5e6da; border-radius:6px; background:white; padding:6px 8px; color:#456e55; font:inherit; font-size:11px; }
+.inquiry-alert-category:hover { background:#e8f3eb; }.inquiry-alert-category strong { font-weight:700; }
+.inquiry-alert-category>span { color:#86a28e; }
+.inquiry-alert-time { margin:10px 0 0; text-align:right; color:#96a198; font-size:10px; }
+@media(max-width:760px) { .inquiry-alerts { padding:15px; margin-bottom:22px; }.inquiry-alert-cards { grid-template-columns:1fr; gap:8px; }.inquiry-alert-header { gap:8px; }.inquiry-alert-store { padding:11px 12px; }.inquiry-alert-name small { display:inline; margin-left:10px; }.inquiry-alert-category { min-height:32px; } }
+@media(max-width:360px) { .inquiry-alert-name small { display:block; margin-left:0; } }
 .inbox-composer { padding:20px 24px; border-top:1px solid var(--line); }
 .inbox-composer label { display:block; font-size:14px; font-weight:600; margin-bottom:12px; }
 .inbox-composer textarea { resize:vertical; min-height:145px; width:100%; font:inherit; font-size:13px; line-height:1.8; padding:14px; border:1px solid #dce5dd; border-radius:9px; color:inherit; }

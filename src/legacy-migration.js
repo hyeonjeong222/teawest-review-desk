@@ -4,7 +4,7 @@ import { AuthVault } from './auth-vault.js';
 import { APIKeyVault } from './api-key-vault.js';
 
 const providers = ['naver', 'coupang', 'ably', 'baemin', 'coupangeats'];
-export const persistentFiles = ['state.json', ...providers.map(p => `${p}-auth.json`), 'openai-key.json'];
+export const persistentFiles = ['state.json', 'inquiries.json', 'coupang-inquiries.json', 'ably-inquiries.json', ...providers.map(p => `${p}-auth.json`), 'openai-key.json'];
 async function exists(file) { try { await access(file); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } }
 export async function migrateLegacyData(sourceRoot, target, { verify = true } = {}) {
   sourceRoot = path.resolve(sourceRoot); target = path.resolve(target);

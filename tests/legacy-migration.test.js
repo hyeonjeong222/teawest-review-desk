@@ -15,8 +15,11 @@ test('legacy migration copies only persistent data, keeps the source intact, and
   await writeFile(path.join(source, '.local', 'state.json'), '{"drafts":{"one":{"text":"saved draft"}}}');
   await writeFile(path.join(source, '.local', 'naver-auth.json'), '{"encrypted":"ciphertext-only"}');
   await writeFile(path.join(source, '.local', 'server.log'), 'excluded');
-  assert.deepEqual(await migrateLegacyData(source, target, { verify: false }), { migrated: true, files: 2 });
-  assert.deepEqual((await readdir(target)).sort(), ['naver-auth.json', 'state.json']);
+  const inquiryFiles = ['inquiries.json', 'coupang-inquiries.json', 'ably-inquiries.json'];
+  for (const file of inquiryFiles) await writeFile(path.join(source, '.local', file), JSON.stringify({ version: 1, records: {}, drafts: { fixture: { text: 'saved inquiry draft' } }, attempts: { fixture: { state: 'uncertain' } }, completions: {} }));
+  assert.deepEqual(await migrateLegacyData(source, target, { verify: false }), { migrated: true, files: 5 });
+  assert.deepEqual((await readdir(target)).sort(), [...inquiryFiles, 'naver-auth.json', 'state.json'].sort());
+  for (const file of inquiryFiles) assert.deepEqual(await readFile(path.join(source, '.local', file)), await readFile(path.join(target, file)));
   assert.deepEqual(await readFile(path.join(source, '.local', 'naver-auth.json')), await readFile(path.join(target, 'naver-auth.json')));
   await writeFile(path.join(target, 'state.json'), '{"newer":"keep"}');
   assert.equal((await migrateLegacyData(source, target, { verify: false })).reason, 'already_initialized');

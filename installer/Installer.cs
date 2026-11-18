@@ -19,7 +19,7 @@ using System.Windows.Forms;
 
 internal static class Installer {
     internal static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
-    internal static readonly string[] SavedFiles = { "state.json", "naver-auth.json", "coupang-auth.json", "ably-auth.json", "baemin-auth.json", "coupangeats-auth.json", "openai-key.json" };
+    internal static readonly string[] SavedFiles = { "state.json", "inquiries.json", "coupang-inquiries.json", "ably-inquiries.json", "naver-auth.json", "coupang-auth.json", "ably-auth.json", "baemin-auth.json", "coupangeats-auth.json", "openai-key.json" };
     [STAThread] static int Main(string[] args) {
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         try {

@@ -1,4 +1,5 @@
 import { deliveryPlatforms, platforms, replyPlatforms, platformLabels, effectiveReviewPeriod } from './platforms.js';
+import { createInquiryAlerts } from './inquiry-alerts.js';
 const icons = {
   inbox: '<path d="M4 4h16l2 10v6H2v-6L4 4Z"/><path d="M2 14h6l2 3h4l2-3h6"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -27,6 +28,7 @@ state.inquiries = { summary: null, loading: false, opening: false, error: '', lo
 state.inquiryPlatform = 'naver';
 state.coupangInquiries = { summary: null, loading: false, error: '', loginRequired: false };
 state.ablyInquiries = { summary: null, loading: false, error: '', loginRequired: false };
+const inquiryAlerts = createInquiryAlerts({ root: $('#inquiry-alerts'), getState: () => ({ naver: state.inquiries, coupang: state.coupangInquiries, ably: state.ablyInquiries }), onRefresh: refreshAllInquiryAlerts, onOpen: openInquiryAlert });
 const replyTones = new Map();
 state.platform = 'naver'; state.platforms = {}; state.syncs = {};
 state.syncRequest = null; state.syncErrors = {}; state.syncProgress = {};
@@ -640,6 +642,7 @@ $('#transfer-dialog').addEventListener('close',()=>{
   $('#transfer-download').hidden=true;$('#transfer-download').removeAttribute('href');
 });
 function renderInquiries() {
+  inquiryAlerts.render();
   const info = state.inquiries, summary = info.summary;
   const busy = info.loading || info.opening;
   $('.inquiry-summary').setAttribute('aria-busy', String(busy));
@@ -714,6 +717,7 @@ function selectInquiryPlatform(platform) {
 }
 function refreshSelectedInquiries() { return state.inquiryPlatform === 'ably' ? refreshAblyInquiries() : state.inquiryPlatform === 'coupang' ? refreshCoupangInquiries() : refreshInquiries(); }
 function renderAblyInquiries() {
+  inquiryAlerts.render();
   const info = state.ablyInquiries, summary = info.summary;
   $('.ably-inquiry-summary').setAttribute('aria-busy', String(info.loading));
   $('#ably-inquiry-refresh').disabled = info.loading || !state.csrf;
@@ -730,10 +734,12 @@ function renderAblyInquiries() {
 }
 async function refreshAblyInquiries() {
   const info = state.ablyInquiries; if (!state.csrf || info.loading) return;
+  let refreshed = false;
   info.loading = true; renderAblyInquiries();
-  try { const result = await api('/api/inquiries/ably/sync', {}); info.summary = result; info.error = ''; info.loginRequired = false; }
+  try { const result = await api('/api/inquiries/ably/sync', {}); info.summary = result; info.error = ''; info.loginRequired = false; refreshed = true; }
   catch (e) { info.error = e.message; info.loginRequired = ['ABLY_LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(e.code); }
   finally { info.loading = false; renderAblyInquiries(); }
+  if (refreshed && ablyInquiryInbox) await (await ablyInquiryInbox).refresh();
 }
 let ablyInquiryInbox;
 async function openAblyInquiry(category) {
@@ -744,6 +750,7 @@ async function openAblyInquiry(category) {
 $('#ably-inquiry-refresh').addEventListener('click', refreshAblyInquiries);
 $('#ably-inquiry-connect').addEventListener('click', async () => { await openBrowser('ably'); await refreshAblyInquiries(); });
 function renderCoupangInquiries() {
+  inquiryAlerts.render();
   const info = state.coupangInquiries, summary = info.summary;
   $('.coupang-inquiry-summary').setAttribute('aria-busy', String(info.loading));
   $('#coupang-inquiry-refresh').disabled = info.loading || !state.csrf;
@@ -759,13 +766,15 @@ function renderCoupangInquiries() {
 }
 async function refreshCoupangInquiries() {
   const info = state.coupangInquiries; if (!state.csrf || info.loading) return;
+  let refreshed = false;
   info.loading = true; renderCoupangInquiries();
   try {
     const result = await api('/api/inquiries/coupang/sync', {});
     if (!result?.store || result.targetDay !== 30 || !Number.isFinite(Date.parse(result.checkedAt)) || !Array.isArray(result.items) || ['center', 'customer'].some(id => !result.items.some(item => item.id === id && Number.isSafeInteger(item.count) && item.count >= 0))) throw new Error('쿠팡 문의 건수를 확인하지 못했습니다. 다시 갱신해 주세요.');
-    info.summary = result; info.error = ''; info.loginRequired = false;
+    info.summary = result; info.error = ''; info.loginRequired = false; refreshed = true;
   } catch (e) { info.error = e.message; info.loginRequired = ['COUPANG_LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(e.code); }
   finally { info.loading = false; renderCoupangInquiries(); }
+  if (refreshed && coupangInquiryInbox) await (await coupangInquiryInbox).refresh();
 }
 let coupangInquiryInbox;
 async function openCoupangInquiry(category) {
@@ -776,6 +785,21 @@ async function openCoupangInquiry(category) {
 $('#coupang-inquiry-refresh').addEventListener('click', refreshCoupangInquiries);
 $('#coupang-inquiry-connect').addEventListener('click', async () => { await openBrowser('coupang'); await refreshCoupangInquiries(); });
 $('#inquiry-platform-mobile').addEventListener('change', event => selectInquiryPlatform(event.target.value));
+
+async function refreshAllInquiryAlerts() {
+  if (!state.csrf || document.hidden) return;
+  await Promise.allSettled([refreshInquiries(), refreshCoupangInquiries(), refreshAblyInquiries()]);
+}
+async function openInquiryAlert(platform, category) {
+  state.inquiryPlatform = platform; selectWorkspace('inquiries');
+  if (!category) { $(`#${platform}-inquiry-view`).scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  try {
+    const create = () => import('./inquiries.js').then(module => module.createInquiryInbox({ api, toast, platform, onSent: platform === 'naver' ? refreshInquiries : platform === 'coupang' ? refreshCoupangInquiries : refreshAblyInquiries, aiConfigured: () => state.aiConfigured, openAISettings: openSettings }));
+    const inbox = await (platform === 'naver' ? (inquiryInbox ||= create()) : platform === 'coupang' ? (coupangInquiryInbox ||= create()) : (ablyInquiryInbox ||= create()));
+    await inbox.open(category, { status: 'pending', selectFirst: true });
+    $(`#${platform === 'naver' ? '' : platform + '-'}inquiry-inbox`).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) { toast(e.message, true); }
+}
 document.addEventListener('click', event => {
   const workspace = event.target.closest('button[data-workspace]'); if (workspace) { selectWorkspace(workspace.dataset.workspace); return; }
   const inquiryPlatform = event.target.closest('[data-inquiry-platform]'); if (inquiryPlatform) { selectInquiryPlatform(inquiryPlatform.dataset.inquiryPlatform); return; }
@@ -840,12 +864,13 @@ try {
   const period = state.syncs.naver?.period || state.sync?.period; if (period) $('#period').value = period;
   renderStats(); renderList(); renderDetail(); renderAutoSync();
   if (location.hash === '#inquiries' || state.workspace === 'inquiries') selectWorkspace('inquiries');
+  if (state.capabilities?.inquiryAlerts) void refreshAllInquiryAlerts();
   await refreshStatus();
 } catch (e) { toast('앱 서버에 연결하지 못했습니다. 실행 상태를 확인해 주세요.', true); }
 setInterval(refreshStatus, 20000);
 setInterval(() => { void refreshReviews().catch(() => { $('#auto-sync-summary').textContent = '앱 서버 연결을 확인해 주세요'; }); }, 5000);
-function refreshVisibleNaverInquiries() { if (state.workspace === 'inquiries' && state.inquiryPlatform === 'naver' && !document.hidden) void refreshInquiries(); }
+function refreshVisibleNaverInquiries() { if (state.capabilities?.inquiryAlerts) { void refreshAllInquiryAlerts(); return; } if (state.workspace === 'inquiries' && state.inquiryPlatform === 'naver' && !document.hidden) void refreshInquiries(); }
 window.addEventListener('focus', () => { void refreshStatus(); refreshVisibleNaverInquiries(); });
 document.addEventListener('visibilitychange', refreshVisibleNaverInquiries);
 setInterval(refreshVisibleNaverInquiries, 30000);
-setInterval(() => { if (state.workspace === 'inquiries' && state.inquiryPlatform !== 'naver' && !document.hidden) void refreshSelectedInquiries(); }, 60000);
+setInterval(() => { if (!state.capabilities?.inquiryAlerts && state.workspace === 'inquiries' && state.inquiryPlatform !== 'naver' && !document.hidden) void refreshSelectedInquiries(); }, 60000);
