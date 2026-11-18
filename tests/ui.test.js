@@ -12,7 +12,7 @@ async function openConnectionSettings(page) {
 }
 before(async () => {
   uiServer = http.createServer(async (req, res) => {
-    const files = { '/': 'index.html', '/app.js': 'app.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
+    const files = { '/': 'index.html', '/app.js': 'app.js', '/inquiries.js': 'inquiries.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
     const name = files[new URL(req.url, 'http://localhost').pathname];
     if (!name) { res.writeHead(404).end(); return; }
     const content = await readFile(new URL(`../public/${name}`, import.meta.url));
@@ -21,6 +21,314 @@ before(async () => {
   uiServer.listen(0, '127.0.0.1'); await once(uiServer, 'listening'); appUrl = `http://127.0.0.1:${uiServer.address().port}`;
 });
 after(async () => { uiServer.closeAllConnections(); await new Promise(resolve => uiServer.close(resolve)); });
+
+test('Naver inquiry refresh updates counts and lists on a timer and focus without replacing the draft editor', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), errors = [], drafts = new Map();
+  await page.clock.install(); page.on('pageerror', e => errors.push(e.message));
+  let rows = [], syncs = 0, lists = 0, failList = false;
+  const row = (id, title) => ({ id: id.repeat(64), store: '테스트 매장', category: 'product', title, content: title, author: '고객', date: '2026-11-18', status: 'pending', canReply: true, fingerprint: id, replyLimit: 1000, messages: [{ id: '1', role: 'customer', text: title }] });
+  const first = row('a', '첫 문의'), second = row('b', '새 상품 문의'), third = row('c', '복귀 후 새 문의');
+  await page.route('**/api/**', async route => {
+    const req = route.request(), pathname = new URL(req.url()).pathname, data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {}, status = 200;
+    if (pathname === '/api/session') result = { csrf: 'fixture', settings: {}, aiConfigured: false };
+    else if (pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (pathname === '/api/status') result = { connected: true };
+    else if (pathname === '/api/inquiries/naver/sync') { syncs++; result = { store: first.store, checkedAt: new Date().toISOString(), items: ['talktalk', 'customer', 'product', 'center'].map(id => ({ id, count: id === 'product' ? rows.length : 0 })) }; }
+    else if (pathname === '/api/inquiries/naver/list') { lists++; if (failList) { status = 502; result = { error: '테스트 조회 실패' }; } else result = { records: rows, store: first.store, checkedAt: new Date().toISOString() }; }
+    else if (pathname.endsWith('/detail')) { const id = pathname.split('/').at(-2); result = { ...rows.find(r => r.id === id), draft: drafts.get(id) || '' }; }
+    else if (pathname.endsWith('/draft')) { drafts.set(pathname.split('/').at(-2), data.text); result = { saved: true }; }
+    else if (pathname.endsWith('/prepare')) result = { token: 'fixture', inquiry: first, text: data.text };
+    else assert.fail('Unexpected action: ' + pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl + '/#inquiries'); await page.locator('[data-inquiry-category="product"]').click(); await page.locator('#inbox-list .empty').waitFor();
+  assert.equal(await page.locator('#inquiry-count-product').innerText(), '0');
+  rows = [first]; await page.clock.fastForward(30000); await page.locator(`[data-inbox-id="${first.id}"]`).waitFor();
+  assert.equal(await page.locator('#inquiry-count-product').innerText(), '1');
+  await page.locator(`[data-inbox-id="${first.id}"]`).click(); await page.locator('#inbox-reply').fill('작성 중인 답변은 보존합니다.');
+  await page.evaluate(() => { window.savedEditor = document.querySelector('#inbox-reply'); window.savedEditor.setSelectionRange(3, 3); });
+  rows = [second, first]; await page.clock.fastForward(30000); await page.locator(`[data-inbox-id="${second.id}"]`).waitFor();
+  assert.equal(await page.locator('#inquiry-count-product').innerText(), '2');
+  assert.deepEqual(await page.evaluate(() => ({ same: savedEditor === document.querySelector('#inbox-reply'), cursor: savedEditor.selectionStart, focus: document.activeElement === savedEditor, text: savedEditor.value })), { same: true, cursor: 3, focus: true, text: '작성 중인 답변은 보존합니다.' });
+  first.fingerprint = 'changed'; first.messages.push({ id: '2', role: 'customer', text: '추가 질문입니다.' }); rows = [third, second, first];
+  await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await page.locator(`[data-inbox-id="${third.id}"]`).waitFor(); await page.locator('#inbox-live-update').waitFor();
+  assert.equal(await page.locator('#inquiry-count-product').innerText(), '3'); assert.equal(await page.locator('#inbox-reply').inputValue(), '작성 중인 답변은 보존합니다.');
+  await page.locator('#inbox-load-latest').click(); await page.locator('.inbox-messages').getByText('추가 질문입니다.', { exact: true }).waitFor(); assert.equal(await page.locator('#inbox-reply').inputValue(), '작성 중인 답변은 보존합니다.');
+  failList = true; await page.locator('#inquiry-refresh').click(); await page.locator('#inbox-error').getByText('테스트 조회 실패', { exact: false }).waitFor(); assert.equal(await page.locator('[data-inbox-id]').count(), 3);
+  failList = false; await page.locator('#inquiry-refresh').click(); await page.locator('#inbox-error').waitFor({ state: 'hidden' });
+  await page.locator('#inbox-prepare').click(); await page.locator('#inbox-confirm[open]').waitFor(); const beforeLists = lists;
+  await page.clock.fastForward(30000); await page.waitForFunction(() => document.querySelector('.inquiry-summary').getAttribute('aria-busy') === 'false'); assert.equal(lists, beforeLists);
+  await page.locator('#inbox-confirm-cancel').click();
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
+  const beforeSyncs = syncs; await page.clock.fastForward(30000); assert.equal(syncs, beforeSyncs);
+  const refreshRequest = page.waitForRequest(r => r.url().endsWith('/naver/sync'));
+  await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: false }); document.dispatchEvent(new Event('visibilitychange')); }); await refreshRequest;
+  assert.deepEqual(errors, []);
+});
+
+test('inquiry GPT preserves edits and platform drafts, previews replacements and keeps sending manual', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } }), errors = [], drafts = new Map(), pending = new Map(), requests = [];
+  page.on('pageerror', e => errors.push(e.message)); let configured = true;
+  const common = { id: '9'.repeat(64), title: '반품 포장 문의', content: '포장은 어떻게 하나요?', author: '고객', product: '셔츠', status: 'pending', canReply: true, fingerprint: 'fixture', replyLimit: 1000, messages: [{ id: '1', role: 'seller', text: '회수 방법을 안내드리겠습니다.' }, { id: '2', role: 'customer', text: '포장은 어떻게 하나요?' }] };
+  const rows = Object.fromEntries(['naver', 'coupang', 'ably'].map(platform => [platform, { ...common, platform, store: platform + ' 매장', category: platform === 'ably' ? 'goods' : 'customer', canComplete: platform === 'ably' }]));
+  const another = { ...rows.naver, id: '8'.repeat(64), title: '다른 고객 문의' };
+  const key = (platform, id) => platform + id;
+  const finish = async (platform, text, fail = false) => {
+    const route = pending.get(platform); assert.ok(route); pending.delete(platform);
+    await route.fulfill({ status: fail ? 429 : 200, contentType: 'application/json', body: JSON.stringify(fail ? { code: 'AI_LIMIT', error: 'OpenAI 사용 한도를 확인해 주세요.' } : { text, fingerprint: 'fixture' }) });
+  };
+  await page.route('**/api/**', async route => {
+    const req = route.request(), pathname = new URL(req.url()).pathname, data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {};
+    if (pathname === '/api/session') result = { csrf: 'fixture', settings: { tone: '정중하게' }, aiConfigured: configured };
+    else if (pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (pathname === '/api/status') result = { connected: true, aiConfigured: configured };
+    else if (pathname.startsWith('/api/inquiries/')) {
+      const [, , , platform, id, action] = pathname.split('/'), row = id === another.id ? another : rows[platform];
+      if (id === 'sync') result = { store: row.store, checkedAt: new Date().toISOString(), items: [{ id: row.category, count: 1 }] };
+      else if (id === 'list') result = { store: row.store, records: platform === 'naver' ? [row, another] : [row] };
+      else if (action === 'detail') result = { ...row, draft: drafts.get(key(platform, id)) || '' };
+      else if (action === 'draft') { drafts.set(key(platform, id), data.text); result = { saved: true }; }
+      else if (action === 'suggest') { requests.push({ platform, id, data }); pending.set(platform, route); return; }
+      else assert.fail('No send or completion action expected: ' + pathname);
+    } else assert.fail(pathname);
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  const start = async prefix => { const request = page.waitForRequest(r => r.url().endsWith('/suggest')); await page.locator(`#${prefix}inbox-generate`).click(); await request; };
+  await page.goto(appUrl + '/#inquiries'); await page.locator('[data-inquiry-category="customer"]').click(); await page.locator(`[data-inbox-id="${common.id}"]`).click();
+  await start(''); assert.equal(await page.locator('#inbox-prepare').isDisabled(), true); assert.equal(await page.locator('#inbox-reply').isEnabled(), true);
+  await page.locator('#inbox-reply').fill('직접 작성한 답변'); await finish('naver', '네이버 GPT 제안입니다.');
+  await page.locator('#inbox-apply-suggestion').waitFor(); assert.equal(await page.locator('#inbox-reply').inputValue(), '직접 작성한 답변');
+  await page.locator('#inbox-apply-suggestion').click(); assert.equal(await page.locator('#inbox-reply').inputValue(), '네이버 GPT 제안입니다.');
+  await page.locator('#inbox-reply').fill(''); await start(''); await page.locator(`[data-inbox-id="${another.id}"]`).click(); await page.locator('#inbox-reply').fill('다른 문의 작성 중');
+  await finish('naver', '첫 문의 새 추천입니다.'); await page.getByText('GPT 초안을 만들었습니다. 문의의 추천 내용을 확인해 주세요.', { exact: true }).waitFor();
+  assert.equal(await page.locator('#inbox-reply').inputValue(), '다른 문의 작성 중');
+  await page.locator(`[data-inbox-id="${common.id}"]`).click(); await page.locator('#inbox-apply-suggestion').waitFor(); assert.equal(await page.locator('#inbox-reply').inputValue(), '');
+  await page.locator('[data-inquiry-platform="coupang"]').click(); await page.locator('[data-coupang-inquiry-category="customer"]').click(); await page.locator('#coupang-inquiry-inbox [data-inbox-id]').click();
+  await start('coupang-'); await finish('coupang', '쿠팡 고객에게 전할 초안입니다.'); await page.waitForFunction(() => document.querySelector('#coupang-inbox-reply')?.value === '쿠팡 고객에게 전할 초안입니다.');
+  assert.equal(await page.locator('#coupang-inbox-apply-suggestion').count(), 0);
+  await page.locator('[data-inquiry-platform="ably"]').click(); await page.locator('[data-ably-inquiry-category="goods"]').click(); await page.locator('#ably-inbox-reply').fill('에이블리 작성 중인 답변');
+  await page.locator('#ably-inbox-tone').selectOption('custom'); await page.locator('#ably-inbox-custom-tone').fill('공감하면서 간결하게'); await start('ably-');
+  assert.equal(requests.at(-1).data.tone, '공감하면서 간결하게'); assert.equal(await page.locator('#ably-inbox-complete').isDisabled(), true);
+  await page.locator('[data-inquiry-platform="coupang"]').click(); await finish('ably', '에이블리 <script>unsafe()</script> 추천입니다.');
+  assert.equal(await page.locator('#coupang-inbox-reply').inputValue(), '쿠팡 고객에게 전할 초안입니다.');
+  await page.locator('[data-inquiry-platform="ably"]').click(); await page.locator('#ably-inbox-apply-suggestion').waitFor(); assert.equal(await page.locator('#ably-inbox-reply').inputValue(), '에이블리 작성 중인 답변');
+  assert.equal(await page.locator('.inbox-ai-suggestion script').count(), 0);
+  await page.screenshot({ path: '.local/inquiry-ai-desktop.png', fullPage: true });
+  await page.locator('#ably-inbox-apply-suggestion').click(); await start('ably-'); await finish('ably', '', true); await page.locator('#ably-inbox-error').getByText('OpenAI 사용 한도를 확인해 주세요.').waitFor();
+  assert.equal(await page.locator('#ably-inbox-reply').inputValue(), '에이블리 <script>unsafe()</script> 추천입니다.');
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: '.local/inquiry-ai-mobile.png', fullPage: true });
+  assert.deepEqual(errors, []); assert.equal(requests.length, 5);
+  await page.waitForFunction(() => document.querySelector('#ably-inbox-save-status')?.textContent === '초안 저장됨');
+  configured = false; await page.reload(); await page.locator('[data-inquiry-category="customer"]').click(); await page.locator(`#inquiry-inbox [data-inbox-id="${common.id}"]`).click(); await page.locator('#inbox-generate').click();
+  await page.locator('#settings-dialog[open]').waitFor(); assert.equal(requests.length, 5);
+});
+
+test('Ably conversation opens immediately, shows card text and confirms completion without sending drafts', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), errors = [], actions = [];
+  page.on('pageerror', e => errors.push(e.message)); let draft = '', uncertain = false;
+  const row = { id: 'f'.repeat(64), store: '에이블리 테스트', category: 'order_after_delivery', title: '주문 / 반품', content: '포장해서 문 앞에 두면 되나요?', author: '고객', date: '2026-11-18T04:00:00Z', status: 'pending', statusLabel: '진행 중', canReply: true, canComplete: true, fingerprint: 'fixture', replyLimit: 3000, messages: [{ id: '1', role: 'system', label: '자동 안내', text: '반품 접수 방법\n앱 > 주문 내역 > 반품 접수\n\n선택 항목: 문의 계속하기' }, { id: '2', role: 'seller', text: '회수 접수를 도와드리겠습니다.' }, { id: '3', role: 'customer', text: '포장해서 문 앞에 두면 되나요?' }] };
+  await page.route('**/api/**', async route => {
+    const request = route.request(), url = new URL(request.url()), data = request.method() === 'POST' ? request.postDataJSON() : {}; let result = {}, status = 200;
+    if (url.pathname === '/api/session') result = { csrf: 'fixture', settings: {} };
+    else if (url.pathname === '/api/status') result = { connected: true };
+    else if (url.pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (url.pathname.endsWith('/sync')) result = { store: row.store, checkedAt: new Date().toISOString(), items: [{ id: 'order_after_delivery', count: row.status === 'pending' ? 1 : 0 }] };
+    else if (url.pathname.endsWith('/list')) result = { store: row.store, records: row.status === 'pending' ? [row] : [], checkedAt: new Date().toISOString() };
+    else if (url.pathname.endsWith('/detail')) result = { ...row, draft };
+    else if (url.pathname.endsWith('/draft')) { draft = data.text; result = { saved: true }; }
+    else if (url.pathname.endsWith('/complete-prepare')) { actions.push('prepare'); result = { token: 'completion', inquiry: { ...row, draft } }; }
+    else if (url.pathname.endsWith('/complete')) {
+      actions.push('complete'); assert.equal(data.token, 'completion');
+      if (uncertain) { row.completionAttempt = { state: 'uncertain' }; status = 409; result = { error: '완료 처리 결과를 확인 중입니다.', code: 'INQUIRY_COMPLETION_UNCERTAIN' }; }
+      else { Object.assign(row, { status: 'answered', statusLabel: '처리 완료', canComplete: false, completionAttempt: { state: 'completed' } }); result = { completed: true, inquiry: { ...row, draft } }; }
+    } else assert.fail('Unexpected mutation ' + url.pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl + '/#inquiries'); await page.locator('[data-inquiry-platform="ably"]').click(); await page.locator('[data-ably-inquiry-category="order_after_delivery"]').click();
+  await page.locator('#ably-inbox-reply').waitFor(); assert.equal(await page.locator('#ably-inquiry-inbox [data-inbox-id][aria-pressed="true"]').count(), 1);
+  assert.match(await page.locator('#ably-inquiry-inbox .inbox-messages').innerText(), /반품 접수 방법/); assert.match(await page.locator('#ably-inquiry-inbox .inbox-item-title').innerText(), /포장해서 문 앞/);
+  await page.locator('#ably-inbox-reply').fill('아직 보내지 않은 초안'); await page.locator('#ably-inbox-complete').click(); await page.getByRole('heading', { name: '이 문의를 완료 처리할까요?' }).waitFor();
+  assert.deepEqual(actions, ['prepare']); assert.match(await page.locator('#ably-inbox-confirm-body').innerText(), /초안으로 보관/); await page.locator('#ably-inbox-confirm-cancel').click(); assert.deepEqual(actions, ['prepare']);
+  await page.locator('#ably-inbox-complete').click(); await page.locator('#ably-inbox-confirm-send').click(); await page.locator('#ably-inbox-confirm[open]').waitFor({ state: 'hidden' });
+  assert.deepEqual(actions, ['prepare', 'prepare', 'complete']); assert.equal(await page.locator('#ably-inbox-complete').count(), 0); assert.equal(await page.locator('#ably-inbox-reply').inputValue(), '아직 보내지 않은 초안'); assert.equal(await page.locator('#ably-inquiry-inbox [data-inbox-id]').count(), 0);
+  Object.assign(row, { status: 'pending', statusLabel: '진행 중', canComplete: true, completionAttempt: null }); uncertain = true;
+  await page.locator('#ably-inbox-refresh').click(); await page.locator('#ably-inbox-complete').waitFor(); await page.locator('#ably-inbox-complete').click(); await page.locator('#ably-inbox-confirm-send').click(); await page.locator('#ably-inbox-confirm[open]').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#ably-inbox-complete').isDisabled(), true); assert.equal(await page.locator('#ably-inbox-reply').count(), 0);
+  Object.assign(row, { status: 'answered', statusLabel: '처리 완료', canComplete: false, completionAttempt: { state: 'completed' } });
+  await page.locator('#ably-inbox-detail-refresh').click(); await page.locator('#ably-inbox-reply').waitFor(); assert.equal(await page.locator('#ably-inquiry-count-order_after_delivery').innerText(), '0');
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true); assert.deepEqual(errors, []);
+});
+
+test('Ably inquiry UI selects seven categories, keeps platform drafts separate and confirms exact replies', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } }), errors = [], sends = [], drafts = {}, categories = ['goods', 'order_before_delivery', 'order_after_delivery', 'order_etc', 'etc', 'place', 'affiliate_sponsorship'];
+  page.on('pageerror', e => errors.push(e.message)); let failed = false, prepared = '';
+  const common = { id: 'e'.repeat(64), content: '회수는 언제 하나요? <script>bad()</script>', author: '고객', title: '주문 / 반품', product: '상품', date: '2026-11-18T04:00:00Z', status: 'pending', canReply: true, fingerprint: 'fixture', replyLimit: 3000, messages: [{ id: '1', role: 'customer', text: '회수는 언제 하나요?' }] };
+  const rows = { ably: { ...common, store: '에이블리 매장', category: 'order_after_delivery' }, naver: { ...common, store: '네이버 매장', category: 'customer' }, coupang: { ...common, store: '쿠팡 매장', category: 'customer' } };
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()), data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {}, status = 200;
+    if (url.pathname === '/api/session') result = { csrf: 'test', settings: {} };
+    else if (url.pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (url.pathname === '/api/status') result = { connected: true };
+    else if (url.pathname.startsWith('/api/inquiries/')) {
+      const [, , , platform, id, action] = url.pathname.split('/'), row = rows[platform];
+      if (id === 'sync') {
+        if (platform === 'ably' && failed) { status = 409; result = { code: 'ABLY_LOGIN_REQUIRED', error: '에이블리 로그인 확인이 필요합니다.' }; }
+        else result = { store: row.store, checkedAt: new Date().toISOString(), items: (platform === 'ably' ? categories : platform === 'coupang' ? ['customer', 'center'] : ['talktalk', 'customer', 'product', 'center']).map(id => ({ id, count: id === 'order_after_delivery' ? 1 : 0 })) };
+      } else if (id === 'list') { if (platform === 'ably') assert.equal(data.period, 'pending'); result = { records: data.category === row.category ? [row] : [], store: row.store, checkedAt: new Date().toISOString() }; }
+      else if (action === 'detail') result = { ...row, draft: drafts[platform] || '' };
+      else if (action === 'draft') { drafts[platform] = data.text; result = { saved: true }; }
+      else if (action === 'prepare') { prepared = data.text; result = { token: 'intent', text: data.text, inquiry: row }; }
+      else if (action === 'publish') { sends.push({ platform, text: prepared }); row.messages = [...row.messages, { id: '2', role: 'seller', text: prepared }]; result = { sent: true, inquiry: { ...row, draft: '' } }; }
+      else assert.fail(url.pathname);
+    } else assert.fail(url.pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl + '/#inquiries');
+  await page.locator('[data-inquiry-category="customer"]').click(); await page.locator('#inquiry-inbox [data-inbox-id]').click(); await page.locator('#inbox-reply').fill('네이버 초안');
+  await page.locator('[data-inquiry-platform="coupang"]').click(); await page.locator('[data-coupang-inquiry-category="customer"]').click(); await page.locator('#coupang-inquiry-inbox [data-inbox-id]').click(); await page.locator('#coupang-inbox-reply').fill('쿠팡 초안');
+  await page.locator('[data-inquiry-platform="ably"]').click(); assert.equal(await page.locator('[data-ably-inquiry-category]').count(), 7);
+  await page.locator('[data-ably-inquiry-category="goods"]').click(); await page.locator('#ably-inbox-list').getByText('표시할 문의가 없습니다').waitFor();
+  await page.locator('[data-ably-inquiry-category="order_after_delivery"]').click(); await page.locator('#ably-inquiry-inbox [data-inbox-id]').click(); await page.locator('#ably-inbox-reply').fill('회수 접수 후 안내드리겠습니다.');
+  assert.equal(await page.locator('[data-ably-inquiry-category="order_after_delivery"]').getAttribute('aria-pressed'), 'true');
+  for (const platform of ['naver', 'coupang']) { await page.locator(`[data-inquiry-platform="${platform}"]`).click(); assert.equal(await page.locator(platform === 'naver' ? '#inbox-reply' : '#coupang-inbox-reply').inputValue(), platform === 'naver' ? '네이버 초안' : '쿠팡 초안'); }
+  await page.locator('[data-inquiry-platform="ably"]').click(); await page.locator('#ably-inbox-prepare').click(); await page.locator('#ably-inbox-confirm[open]').waitFor(); assert.equal(sends.length, 0);
+  assert.match(await page.locator('#ably-inbox-confirm-body').innerText(), /에이블리 매장/); assert.equal(await page.locator('#ably-inbox-confirm-body script').count(), 0);
+  await page.locator('#ably-inbox-confirm-send').click(); await page.locator('#ably-inbox-confirm[open]').waitFor({ state: 'hidden' }); assert.deepEqual(sends, [{ platform: 'ably', text: '회수 접수 후 안내드리겠습니다.' }]);
+  assert.equal(await page.locator('#ably-inbox-reply').inputValue(), '');
+  failed = true; await page.locator('#ably-inquiry-refresh').click(); await page.locator('#ably-inquiry-connect').waitFor(); assert.equal(await page.locator('#ably-inquiry-count-order_after_delivery').innerText(), '—');
+  await page.setViewportSize({ width: 390, height: 844 }); await page.locator('#inquiry-platform-mobile').selectOption('naver'); await page.locator('#inquiry-platform-mobile').selectOption('ably'); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true); assert.deepEqual(errors, []);
+});
+
+test('Coupang inquiry UI isolates drafts and confirmation from Naver, including confirmation-only tickets', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } }), errors = [], sends = [];
+  page.on('pageerror', e => errors.push(e.message));
+  const common = { id: 'c'.repeat(64), title: '배송 문의', content: '<script>unsafe()</script> 언제 오나요?', author: '고객', product: '상품', date: '2026-11-18', status: 'pending', canReply: true, fingerprint: 'fixture', replyLimit: 2000, messages: [{ id: '1', role: 'customer', text: '언제 오나요?' }] };
+  const rows = { naver: { ...common, store: '네이버 매장', category: 'customer' }, coupang: { ...common, store: '쿠팡 매장', category: 'customer' }, center: { ...common, id: 'd'.repeat(64), store: '쿠팡 매장', category: 'center', replyMode: 'confirm', confirmationText: '[쿠팡 시스템] 판매자님이 확인하신 CS문의입니다.' } };
+  const drafts = {}, prepared = {}; let failed = false;
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()), data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {}, status = 200;
+    if (url.pathname === '/api/session') result = { csrf: 'test', settings: {}, aiConfigured: false };
+    else if (url.pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (url.pathname === '/api/status') result = { connected: true };
+    else if (url.pathname.startsWith('/api/inquiries/')) {
+      const [, , , platform, id, action] = url.pathname.split('/'), row = id === rows.center.id ? rows.center : rows[platform];
+      if (id === 'sync') {
+        if (platform === 'coupang' && failed) { status = 409; result = { code: 'COUPANG_LOGIN_REQUIRED', error: '쿠팡 로그인 확인이 필요합니다.' }; }
+        else result = { store: rows[platform].store, targetDay: 30, checkedAt: new Date().toISOString(), items: (platform === 'naver' ? ['talktalk', 'customer', 'product', 'center'] : ['center', 'customer']).map(id => ({ id, count: 0 })) };
+      } else if (id === 'list') { assert.equal(data.period, platform === 'coupang' ? '1m' : '3m'); result = { records: [data.category === 'center' ? rows.center : row], store: row.store, checkedAt: new Date().toISOString() }; }
+      else if (action === 'detail') result = { ...row, draft: drafts[platform + id] || '' };
+      else if (action === 'draft') { drafts[platform + id] = data.text; result = { saved: true }; }
+      else if (action === 'prepare') { prepared[id] = data.text; result = { token: 'intent-' + id, text: data.text, inquiry: row }; }
+      else if (action === 'publish') { sends.push({ platform, id, text: prepared[id] }); row.canReply = false; row.status = 'answered'; row.messages.push({ id: '2', role: 'seller', text: prepared[id] }); result = { sent: true, inquiry: row }; }
+      else assert.fail('Unexpected inquiry request ' + url.pathname);
+    } else assert.fail('Unexpected request ' + url.pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl + '/#inquiries'); await page.locator('[data-inquiry-category="customer"]').click(); await page.locator('#inquiry-inbox [data-inbox-id]').click();
+  await page.locator('#inbox-reply').fill('네이버 초안은 유지하세요.');
+  await page.locator('[data-inquiry-platform="coupang"]').click(); await page.locator('[data-coupang-inquiry-category="customer"]').click(); await page.locator('#coupang-inquiry-inbox [data-inbox-id]').click();
+  await page.locator('#coupang-inbox-reply').fill('쿠팡 고객에게 전달할 답변입니다.');
+  await page.locator('[data-inquiry-platform="naver"]').click(); assert.equal(await page.locator('#inbox-reply').inputValue(), '네이버 초안은 유지하세요.');
+  await page.locator('[data-inquiry-platform="coupang"]').click(); assert.equal(await page.locator('#coupang-inbox-reply').inputValue(), '쿠팡 고객에게 전달할 답변입니다.');
+  await page.locator('#coupang-inbox-prepare').click(); await page.locator('#coupang-inbox-confirm[open]').waitFor(); assert.equal(sends.length, 0);
+  assert.match(await page.locator('#coupang-inbox-confirm-body').innerText(), /쿠팡 매장/); assert.equal(await page.locator('#coupang-inbox-confirm-body script').count(), 0);
+  await page.locator('#coupang-inbox-confirm-send').click(); await page.locator('#coupang-inbox-confirm[open]').waitFor({ state: 'hidden' });
+  assert.equal(sends.length, 1); assert.equal(sends[0].platform, 'coupang'); assert.equal(sends[0].text, '쿠팡 고객에게 전달할 답변입니다.');
+  await page.locator('[data-coupang-inquiry-category="center"]').click(); await page.locator('#coupang-inquiry-inbox [data-inbox-id]').click();
+  assert.equal(await page.locator('#coupang-inbox-reply').getAttribute('readonly'), '');
+  assert.equal(await page.locator('#coupang-inbox-generate').count(), 0);
+  await page.locator('#coupang-inbox-prepare').click(); await page.getByRole('heading', { name: '확인완료로 처리할까요?' }).waitFor(); assert.equal(sends.length, 1);
+  await page.locator('#coupang-inbox-confirm-send').click(); await page.locator('#coupang-inbox-confirm[open]').waitFor({ state: 'hidden' }); assert.equal(sends[1].text, rows.center.confirmationText);
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  assert.equal(await page.evaluate(() => { const ids = [...document.querySelectorAll('[id]')].map(el => el.id); return new Set(ids).size === ids.length; }), true);
+  failed = true; await page.locator('#coupang-inquiry-refresh').click(); await page.getByText('쿠팡 로그인 확인이 필요합니다.', { exact: true }).waitFor();
+  assert.equal(await page.locator('#coupang-inquiry-count-customer').innerText(), '—'); assert.equal(await page.locator('#coupang-inquiry-connect').isVisible(), true);
+  assert.deepEqual(errors, []);
+});
+
+test('inquiry inbox reads details, retains drafts, confirms exact text and never resends an uncertain answer', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } }); const errors = []; page.on('pageerror', e => errors.push(e.message));
+  const id = 'a'.repeat(64), id2 = 'b'.repeat(64);
+  const inquiry = { id, category: 'customer', sourceId: '123', store: '테스트 매장', title: '배송 일정 문의', content: '<img src=x onerror=alert(1)> 언제 오나요?', author: '고객', product: '테스트 상품', date: '2026-11-18', status: 'pending', canReply: true, fingerprint: 'fixture', replyLimit: 1000, messages: [{ id: '1', role: 'customer', text: '언제 오나요?' }], draft: '' };
+  let draft = '', prepared, sends = 0, listRequests = 0;
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()), data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {}, status = 200;
+    if (url.pathname === '/api/session') result = { csrf: 'test', settings: {}, aiConfigured: false };
+    else if (url.pathname === '/api/reviews') result = { reviews: [], drafts: {} };
+    else if (url.pathname === '/api/status') result = { connected: true };
+    else if (url.pathname === '/api/inquiries/naver/sync') result = { store: '테스트 매장', checkedAt: new Date().toISOString(), items: ['talktalk', 'customer', 'product', 'center'].map(id => ({ id, count: 0 })) };
+    else if (url.pathname.endsWith('/list')) { listRequests++; result = { records: data.category === 'customer' ? [inquiry, { ...inquiry, id: id2, title: '두 번째 문의' }] : [], store: inquiry.store, checkedAt: new Date().toISOString() }; }
+    else if (url.pathname.endsWith('/detail')) result = { ...inquiry, id: url.pathname.split('/')[4], draft };
+    else if (url.pathname.endsWith('/draft')) { draft = data.text; result = { saved: true }; }
+    else if (url.pathname.endsWith('/prepare')) { prepared = data.text; result = { token: 'confirmed', text: prepared, inquiry }; }
+    else if (url.pathname.endsWith('/publish')) { sends++; inquiry.attempt = { state: 'uncertain' }; status = 409; result = { code: 'INQUIRY_UNCERTAIN', error: '등록 결과를 확인 중입니다.' }; }
+    else assert.fail('Unexpected request ' + url.pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl + '/#inquiries'); await page.locator('[data-inquiry-category="customer"]').click();
+  await page.locator(`[data-inbox-id="${id}"]`).click(); await page.locator('#inbox-reply').fill('내일 출고될 예정입니다.');
+  await page.locator(`[data-inbox-id="${id2}"]`).click(); await page.locator('#inbox-reply').waitFor();
+  await page.locator(`[data-inbox-id="${id}"]`).click(); await page.locator('#inbox-reply').waitFor();
+  assert.equal(await page.locator('#inbox-reply').inputValue(), '내일 출고될 예정입니다.');
+  await page.locator('#inbox-prepare').click(); await page.locator('#inbox-confirm[open]').waitFor(); assert.equal(sends, 0);
+  assert.equal(await page.locator('#inbox-confirm-text').innerText(), '내일 출고될 예정입니다.'); assert.equal(await page.locator('#inbox-confirm-body img').count(), 0);
+  await page.locator('#inbox-confirm-cancel').click(); assert.equal(sends, 0);
+  await page.locator('#inbox-reply').fill('확인 결과 모레 출고 예정입니다.'); await page.locator('#inbox-prepare').click();
+  await page.locator('#inbox-confirm-send').click(); await page.locator('#inbox-confirm[open]').waitFor({ state: 'hidden' });
+  assert.equal(prepared, '확인 결과 모레 출고 예정입니다.'); assert.equal(sends, 1); assert.equal(await page.locator('#inbox-prepare').count(), 0);
+  await page.locator('#inbox-detail-refresh').click(); await page.getByText('답변 등록 결과를 확인 중입니다.', { exact: false }).waitFor(); assert.equal(sends, 1);
+  await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  assert.equal(listRequests, 1); assert.deepEqual(errors, []);
+});
+
+test('Naver inquiry workspace separates navigation, preserves review drafts, opens exact categories and shows failures as unknown', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), calls = [], errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  let failed = false, draft = '';
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()); let result = {}, status = 200;
+    if (url.pathname === '/api/session') result = { csrf: 'test', settings: { brand: '테스트' }, aiConfigured: false };
+    else if (url.pathname === '/api/reviews') result = { reviews: [{ id: '123', product: '상품', content: '후기', author: '고객', date: '2026.11.18', rating: 5, hasReply: false }], drafts: draft ? { '123': { text: draft } } : {} };
+    else if (url.pathname === '/api/status') result = { connected: true, aiConfigured: false };
+    else if (url.pathname.endsWith('/draft')) { draft = req.postDataJSON().text; }
+    else if (url.pathname === '/api/inquiries/naver/sync') {
+      calls.push(url.pathname);
+      if (failed) { status = 409; result = { error: '네이버 로그인 확인이 필요합니다.', code: 'LOGIN_REQUIRED' }; }
+      else result = { platform: 'naver', store: '테스트', checkedAt: new Date().toISOString(), items: ['talktalk', 'customer', 'product', 'center'].map((id, i) => ({ id, count: i })) };
+    }
+    else if (url.pathname === '/api/inquiries/naver/list') { calls.push(req.postDataJSON().category); result = { records: [], store: '테스트', checkedAt: new Date().toISOString() }; }
+    else assert.fail('Unexpected endpoint: ' + url.pathname);
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  await page.goto(appUrl); await page.locator('#reply-editor').fill('탭을 바꿔도 남아 있는 리뷰 초안');
+  await page.locator('#inquiry-workspace-tab').click();
+  await page.waitForFunction(() => document.querySelector('#inquiry-count-center').textContent === '3');
+  assert.equal(await page.locator('#review-workspace').isVisible(), false);
+  assert.equal(await page.locator('#inquiry-count-talktalk').innerText(), '0');
+  assert.equal(await page.locator('#inquiry-workspace').getByRole('button', { name: '전체', exact: true }).count(), 0);
+  assert.equal(await page.locator('#inquiry-workspace [data-platform]').count(), 0);
+  await page.locator('[data-inquiry-category="customer"]').click();
+  await page.waitForFunction(() => document.querySelector('#inbox-refresh') && !document.querySelector('#inbox-refresh').disabled);
+  assert.ok(calls.includes('customer'));
+  failed = true; await page.locator('#inquiry-refresh').click();
+  await page.getByText('네이버 로그인 확인이 필요합니다.', { exact: true }).waitFor();
+  assert.equal(await page.locator('#inquiry-count-center').innerText(), '—'); assert.equal(await page.locator('#inquiry-connect').isVisible(), true);
+  failed = false; await page.locator('#inquiry-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#inquiry-count-center').textContent === '3');
+  assert.equal(await page.locator('#inquiry-connect').isVisible(), false);
+  for (const width of [390, 320]) { await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true); }
+  await page.locator('#review-workspace-tab').click();
+  assert.equal(await page.locator('#reply-editor').inputValue(), '탭을 바꿔도 남아 있는 리뷰 초안');
+  assert.deepEqual(errors, []);
+});
 
 test('update UI saves pending drafts before installer launch and remains usable on mobile', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());

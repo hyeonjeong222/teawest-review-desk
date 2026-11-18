@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>티웨스트 · Review Desk</title>
-  <meta name="description" content="온라인 스토어와 배달 매장의 리뷰·답글을 관리하는 티웨스트 리뷰 데스크">
+  <meta name="description" content="온라인 스토어와 배달 매장의 리뷰·답글, 네이버 문의 현황을 관리하는 티웨스트 리뷰 데스크">
   <link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -21,6 +21,14 @@
     <button class="channel" id="connect-sidebar" data-platform="naver" aria-pressed="false" aria-label="네이버 리뷰 보기"><span class="naver-logo">N</span><span>네이버 스마트스토어<small id="sidebar-connection">연결 확인 중</small></span><span class="status-dot" id="connection-dot"></span></button>
     <button class="channel" id="connect-coupang-sidebar" data-platform="coupang" aria-pressed="false" aria-label="쿠팡 리뷰 보기"><span class="coupang-logo">C</span><span>쿠팡윙<small id="coupang-sidebar-connection">조회 전용 · 연결 확인 중</small></span><span class="status-dot" id="coupang-connection-dot"></span></button>
     <button class="channel" id="connect-ably-sidebar" data-platform="ably" aria-pressed="false" aria-label="에이블리 리뷰 보기"><span class="ably-logo">A</span><span>에이블리<small id="ably-sidebar-connection">조회 전용 · 연결 확인 중</small></span><span class="status-dot" id="ably-connection-dot"></span></button>
+    <section class="inquiry-sidebar" aria-labelledby="inquiry-sidebar-label">
+      <div class="nav-label" id="inquiry-sidebar-label">문의 스토어</div>
+      <nav aria-label="문의 스토어 선택">
+        <button class="channel inquiry-channel active" data-inquiry-platform="naver" aria-pressed="true" aria-controls="naver-inquiry-view" aria-label="네이버 문의 보기" title="네이버 문의"><span class="naver-logo">N</span><span>네이버 스마트스토어<small>문의 조회 · 답변</small></span></button>
+        <button class="channel inquiry-channel" data-inquiry-platform="coupang" aria-pressed="false" aria-controls="coupang-inquiry-view" aria-label="쿠팡 문의 보기" title="쿠팡 문의"><span class="coupang-logo">C</span><span>쿠팡윙<small>문의 조회 · 답변</small></span></button>
+        <button class="channel inquiry-channel" data-inquiry-platform="ably" aria-pressed="false" aria-controls="ably-inquiry-view" aria-label="에이블리 문의 보기" title="에이블리 문의"><span class="ably-logo">A</span><span>에이블리<small>문의 조회 · 답변</small></span></button>
+      </nav>
+    </section>
     <div class="sidebar-bottom">
       <div class="human-note"><span data-icon="sparkles"></span><strong>마지막 한마디는 직접.</strong><p>AI의 제안에 마음을 더해<br>나만의 답글을 완성하세요.</p></div>
       <button class="nav-item" id="settings-open" aria-label="브랜드 · GPT 설정" title="브랜드 · GPT 설정"><span data-icon="settings"></span>브랜드 · GPT 설정</button>
@@ -29,6 +37,8 @@
   </aside>
   <main class="main">
     <header class="topbar"><div class="breadcrumb">워크스페이스<span>/</span><strong id="platform-heading">네이버 리뷰</strong></div><div class="topbar-right"><button class="text-button app-update-open" id="app-update-open"><span data-icon="refresh"></span>업데이트</button><button class="ai-chip" id="ai-chip"><span data-icon="sparkles"></span><span id="ai-status">GPT 연결하기</span></button><span class="profile">T</span></div></header>
+    <nav class="workspace-tabs" aria-label="업무 선택"><button id="review-workspace-tab" class="active" data-workspace="reviews" aria-pressed="true" aria-controls="review-workspace">리뷰 관리</button><button id="inquiry-workspace-tab" data-workspace="inquiries" aria-pressed="false" aria-controls="inquiry-workspace">문의 관리</button></nav>
+    <div id="review-workspace" aria-labelledby="review-workspace-tab">
     <section class="page-heading"><div><div class="eyebrow">CUSTOMER VOICES</div><h1>리뷰 관리<span class="heading-dot">.</span></h1><p>고객의 이야기를 한눈에, 답글은 더 세심하게.</p></div><div class="sync-controls"><div class="sync-meta" id="sync-meta">네이버 리뷰를 가져와 시작하세요</div><div class="sync-row"><label class="sr-only" for="period">전체 스토어 조회 기간</label><select id="period"><option value="1m">최근 1개월</option><option value="3m" selected>최근 3개월</option><option value="6m">최근 6개월</option><option value="1y">최근 1년</option></select><button id="sync-button" class="button primary"><span data-icon="refresh"></span><span>새 리뷰·답글 갱신</span></button><button id="sync-full-button" class="button ghost" title="선택한 기간의 모든 리뷰와 답글을 다시 확인합니다">전체 다시 확인</button></div><p id="period-status" class="period-status" role="status" aria-live="polite"></p><p class="sync-policy">리뷰는 이 PC에 보관됩니다. 최근 변경분을 먼저 갱신하고, 오래된 답글은 구간별로 순차 확인합니다.</p></div></section>
     <div class="platform-bar"><div class="platform-tabs" role="group" aria-label="스토어 선택"><button data-platform="naver" class="active">네이버 <span id="platform-naver">0</span></button><button data-platform="coupang">쿠팡 <span id="platform-coupang">0</span></button><button data-platform="ably">에이블리 <span id="platform-ably">0</span></button></div></div>
     <div class="workspace-tools">
@@ -73,6 +83,47 @@
         <div class="list-footer"><span class="naver-small">R</span><span id="list-footer-platform">네이버 · 쿠팡 · 에이블리</span><span id="list-footer-count">0개 리뷰</span></div>
       </section>
       <section class="detail-panel" id="detail-panel" aria-label="리뷰 상세 및 답글"><div class="empty detail-empty"><span data-icon="messages"></span><h3>고객의 이야기를 선택해 주세요</h3><p>리뷰를 선택하면 내용을 확인하고<br>추천 답글을 받아볼 수 있어요.</p></div></section>
+    </section>
+    </div>
+    <section id="inquiry-workspace" aria-labelledby="inquiry-workspace-tab" hidden>
+      <label class="inquiry-mobile-picker" for="inquiry-platform-mobile"><span>문의 스토어</span><select id="inquiry-platform-mobile"><option value="naver">네이버</option><option value="coupang">쿠팡</option><option value="ably">에이블리</option></select></label>
+      <div id="naver-inquiry-view">
+      <div class="page-heading"><div><div class="inquiry-platform"><span class="naver-small">N</span>네이버 스마트스토어</div><h1>문의 관리<span class="heading-dot">.</span></h1><p>문의 내용을 확인하고, 고객에게 답변을 전하세요.</p></div><button id="inquiry-refresh" class="button primary"><span data-icon="refresh"></span>문의 현황 갱신</button></div>
+      <section class="inquiry-summary" aria-labelledby="inquiry-summary-title" aria-busy="false">
+        <div class="inquiry-summary-header"><span class="inquiry-symbol"><span data-icon="messages"></span></span><h2 id="inquiry-summary-title">문의 · 리뷰 현황</h2><span id="inquiry-store" class="inquiry-store">네이버</span></div>
+        <div class="inquiry-summary-body"><h3>확인 필요한 문의 <span class="inquiry-info" title="네이버 스마트스토어센터 홈에 표시되는 확인 필요한 문의 건수입니다."><span data-icon="info"></span></span></h3>
+          <div class="inquiry-categories" aria-label="네이버 문의 종류">
+            <button data-inquiry-category="talktalk"><span>톡톡 문의</span><strong id="inquiry-count-talktalk">—</strong><span class="sr-only">문의 화면 열기</span></button>
+            <button data-inquiry-category="customer"><span>주문 고객 문의</span><strong id="inquiry-count-customer">—</strong><span class="sr-only">문의 화면 열기</span></button>
+            <button data-inquiry-category="product"><span>상품 Q&amp;A</span><strong id="inquiry-count-product">—</strong><span class="sr-only">문의 화면 열기</span></button>
+            <button data-inquiry-category="center"><span>고객센터</span><strong id="inquiry-count-center">—</strong><span class="sr-only">문의 화면 열기</span></button>
+          </div>
+          <div class="inquiry-status-row"><p id="inquiry-status" role="status" aria-live="polite">네이버 문의 현황을 확인해 주세요.</p><button id="inquiry-connect" class="text-button" hidden>네이버 연결 창 열기 ↗</button></div>
+          <p class="inquiry-footnote">이 화면에서는 30초마다 건수와 문의 목록을 갱신합니다. 다른 창에서 돌아오면 바로 다시 확인합니다.</p>
+        </div>
+      </section>
+      <section id="inquiry-inbox" hidden aria-label="네이버 문의함"></section>
+      </div>
+      <div id="coupang-inquiry-view" hidden>
+        <div class="page-heading"><div><div class="inquiry-platform"><span class="coupang-inquiry-mark">C</span>쿠팡윙</div><h1>문의 관리<span class="heading-dot">.</span></h1><p>고객문의와 고객센터 문의를 확인하고 답변하세요.</p></div><button id="coupang-inquiry-refresh" class="button primary"><span data-icon="refresh"></span>문의 현황 갱신</button></div>
+        <section class="coupang-inquiry-summary" aria-labelledby="coupang-inquiry-title">
+          <div class="coupang-inquiry-summary-head"><div><h2 id="coupang-inquiry-title">미답변문의</h2><p>최근 30일 기준</p></div><span id="coupang-inquiry-store">쿠팡</span></div>
+          <div class="coupang-inquiry-categories"><button data-coupang-inquiry-category="center"><span>고객센터문의</span><strong id="coupang-inquiry-count-center">—</strong><span aria-hidden="true">›</span></button><button data-coupang-inquiry-category="customer"><span>고객문의</span><strong id="coupang-inquiry-count-customer">—</strong><span aria-hidden="true">›</span></button></div>
+          <div class="inquiry-status-row"><p id="coupang-inquiry-status" role="status" aria-live="polite">쿠팡 문의 현황을 확인해 주세요.</p><button id="coupang-inquiry-connect" class="text-button" hidden>쿠팡 연결 창 열기 ↗</button></div>
+          <p class="inquiry-footnote">항목을 누르면 아래 문의함에서 내용과 답변을 확인할 수 있습니다.</p>
+        </section>
+        <section id="coupang-inquiry-inbox" hidden aria-label="쿠팡 문의함"></section>
+      </div>
+      <div id="ably-inquiry-view" hidden>
+        <div class="page-heading"><div><div class="inquiry-platform"><span class="ably-logo">A</span>에이블리</div><h1>문의 관리<span class="heading-dot">.</span></h1><p>문의 종류별로 대화를 확인하고 답변하세요.</p></div><button id="ably-inquiry-refresh" class="button primary"><span data-icon="refresh"></span>문의 현황 갱신</button></div>
+        <section class="ably-inquiry-summary" aria-labelledby="ably-inquiry-title">
+          <div class="ably-inquiry-summary-head"><h2 id="ably-inquiry-title"><span data-icon="messages"></span>미완료 문의</h2><span id="ably-inquiry-store">에이블리</span></div>
+          <div class="ably-inquiry-categories"><button data-ably-inquiry-category="goods"><span>상품 문의</span><strong id="ably-inquiry-count-goods">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button><button data-ably-inquiry-category="order_before_delivery"><span>배송 전 변경 / 취소문의</span><strong id="ably-inquiry-count-order_before_delivery">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button><button data-ably-inquiry-category="order_after_delivery"><span>교환 / 반품 문의</span><strong id="ably-inquiry-count-order_after_delivery">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button><button data-ably-inquiry-category="order_etc"><span>배송 / 기타 / 결제 문의</span><strong id="ably-inquiry-count-order_etc">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button><button data-ably-inquiry-category="etc"><span>기타 문의</span><strong id="ably-inquiry-count-etc">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button><button data-ably-inquiry-category="place"><span>플레이스 문의</span><strong id="ably-inquiry-count-place">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button><button data-ably-inquiry-category="affiliate_sponsorship"><span>협찬 문의</span><strong id="ably-inquiry-count-affiliate_sponsorship">—</strong><span class="inquiry-unit">건</span><span aria-hidden="true">›</span></button></div>
+          <div class="inquiry-status-row"><p id="ably-inquiry-status" role="status" aria-live="polite">에이블리 문의 현황을 확인해 주세요.</p><button id="ably-inquiry-connect" class="text-button" hidden>에이블리 연결 창 열기 ↗</button></div>
+          <p class="inquiry-footnote">진행 중·보류 문의 기준입니다. 항목을 누르면 문의 내용과 답변 이력을 확인할 수 있습니다.</p>
+        </section>
+        <section id="ably-inquiry-inbox" hidden aria-label="에이블리 문의함"></section>
+      </div>
     </section>
     <footer class="page-footer"><span>REVIEW DESK <span class="footer-divider">/</span> TEAWEST</span><span>추천은 AI가, 등록은 내가.</span></footer>
   </main>

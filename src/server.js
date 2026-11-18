@@ -5,6 +5,12 @@ import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { Store, ReviewService, AppError, SerialQueue, assertReplyable } from './core.js';
 import { NaverConnector } from './naver.js';
+import { NaverInquiryService } from './naver-inquiries.js';
+import { NaverInquiryInbox } from './naver-inquiry-inbox.js';
+import { InquiryInbox } from './inquiry-inbox.js';
+import { CoupangInquiryAdapter } from './coupang-inquiries.js';
+import { AblyInquiryAdapter } from './ably-inquiries.js';
+import { AblyInquiryInbox } from './ably-inquiry-inbox.js';
 import { ReplyAI } from './ai.js';
 import { AuthVault } from './auth-vault.js';
 import { AutoLogin } from './auto-login.js';
@@ -26,15 +32,21 @@ import {selectCachedPeriod} from './review-cache.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appVersion = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
-export async function createApp({ directory = dataDirectory(), connector, coupangConnector, ablyConnector, deliveryConnectors = {}, deliveryAccountConnectors = {}, deliveryVaults = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000, updater, onShutdown } = {}) {
+export async function createApp({ directory = dataDirectory(), connector, inquiryAdapter, coupangInquiryAdapter, ablyInquiryAdapter, coupangConnector, ablyConnector, deliveryConnectors = {}, deliveryAccountConnectors = {}, deliveryVaults = {}, ai = new ReplyAI(), vault, coupangVault, ablyVault, keyVault, port = 4317, maintenanceInterval = 20000, updater, onShutdown } = {}) {
   await recoverCredentialTransfer(directory);
   const store = new Store(directory); await store.init();
   connector ||= new NaverConnector(directory);
   const service = new ReviewService(store, connector, ai);
+  const naverInquiries = new NaverInquiryService(connector, service.queue);
+  const inquiryInbox = new NaverInquiryInbox(directory, connector, service.queue, inquiryAdapter); await inquiryInbox.init();
   coupangConnector ||= new CoupangConnector(directory, connector);
   const coupangService = new CoupangReviewService(store, coupangConnector);
+  coupangInquiryAdapter ||= new CoupangInquiryAdapter(coupangConnector);
+  const coupangInquiryInbox = new InquiryInbox(directory, coupangInquiryAdapter, coupangService.queue, { filename: 'coupang-inquiries.json' }); await coupangInquiryInbox.init();
   ablyConnector ||= new AblyConnector(directory, connector);
   const ablyService = new AblyReviewService(store, ablyConnector);
+  ablyInquiryAdapter ||= new AblyInquiryAdapter(ablyConnector);
+  const ablyInquiryInbox = new AblyInquiryInbox(directory, ablyInquiryAdapter, ablyService.queue); await ablyInquiryInbox.init();
   vault ||= new AuthVault(directory); await vault.init();
   const autoLogin = new AutoLogin(connector, vault, service.queue);
   coupangVault ||= new AuthVault(directory, undefined, { platform: 'coupang' }); await coupangVault.init();
@@ -134,6 +146,29 @@ export async function createApp({ directory = dataDirectory(), connector, coupan
           } finally {data.password='';transferring=false;}
         }
         if (route === '/api/auto-sync/settings') return json(res, 200, await autoSync.save(data));
+        if (route === '/api/inquiries/naver/sync') return json(res, 200, await naverInquiries.sync());
+        if (route === '/api/inquiries/naver/open') return json(res, 200, await naverInquiries.open(data.category));
+        if (route === '/api/inquiries/naver/list') return json(res, 200, await inquiryInbox.list(data.category, data.period));
+        if (route === '/api/inquiries/coupang/sync') return json(res, 200, await coupangService.queue.run(() => coupangInquiryAdapter.summary()));
+        if (route === '/api/inquiries/coupang/open') return json(res, 200, await coupangService.queue.run(() => coupangInquiryAdapter.open(data.category)));
+        if (route === '/api/inquiries/coupang/list') return json(res, 200, await coupangInquiryInbox.list(data.category, data.period));
+        if (route === '/api/inquiries/ably/sync') return json(res, 200, await ablyService.queue.run(() => ablyInquiryAdapter.summary()));
+        if (route === '/api/inquiries/ably/open') return json(res, 200, await ablyService.queue.run(() => ablyInquiryAdapter.open(data.category)));
+        if (route === '/api/inquiries/ably/list') return json(res, 200, await ablyInquiryInbox.list(data.category, data.period));
+        const completionMatch = route.match(/^\/api\/inquiries\/ably\/([a-f0-9]{64})\/(complete-prepare|complete)$/);
+        if (completionMatch) {
+          const [, id, action] = completionMatch;
+          return json(res, 200, await (action === 'complete-prepare' ? ablyInquiryInbox.prepareComplete(id, data.fingerprint) : ablyInquiryInbox.complete(id, data.token)));
+        }
+        const inquiryMatch = route.match(/^\/api\/inquiries\/(naver|coupang|ably)\/([a-f0-9]{64})\/(detail|draft|suggest|prepare|publish)$/);
+        if (inquiryMatch) {
+          const [, platform, id, action] = inquiryMatch, inbox = { naver: inquiryInbox, coupang: coupangInquiryInbox, ably: ablyInquiryInbox }[platform];
+          if (action === 'detail') return json(res, 200, await inbox.detail(id));
+          if (action === 'draft') return json(res, 200, await inbox.draft(id, data.text));
+          if (action === 'suggest') return json(res, 200, await inbox.suggest(id, ai, store.data.settings, data.fingerprint, data.tone));
+          if (action === 'prepare') return json(res, 200, await inbox.prepare(id, data.text, data.fingerprint));
+          if (action === 'publish') return json(res, 200, await inbox.publish(id, data.token));
+        }
         if (route === '/api/browser/open') {
           if (deliveryPlatforms[data.platform]) {
             const provider = deliveryPlatforms[data.platform].provider, auth = deliveryAuth[provider].publicState();
@@ -220,7 +255,7 @@ export async function createApp({ directory = dataDirectory(), connector, coupan
         }
         throw new AppError('요청한 기능을 찾을 수 없습니다.', 404);
       }
-      const files = { '/': 'index.html', '/app.js': 'app.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
+      const files = { '/': 'index.html', '/app.js': 'app.js', '/inquiries.js': 'inquiries.js', '/platforms.js': 'platforms.js', '/styles.css': 'styles.css', '/favicon.svg': 'favicon.svg' };
       if (req.method !== 'GET' || !files[route]) throw new AppError('페이지를 찾을 수 없습니다.', 404);
       const contents = await readFile(path.join(root, 'public', files[route]));
       const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml' };

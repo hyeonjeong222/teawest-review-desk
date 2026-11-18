@@ -22,6 +22,11 @@ const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] 
 const $ = s => document.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const state = { reviews: [], drafts: {}, filter: 'all', query: '', rating: 'all', selected: null, settings: {}, autoLogin: {}, csrf: '', aiConfigured: false, connected: false, syncing: false, generating: new Set(), suggestions: new Map(), edits: new Map(), saving: new Map(), saveTimers: new Map(), intent: null, publishing: false };
+state.workspace = 'reviews';
+state.inquiries = { summary: null, loading: false, opening: false, error: '', loginRequired: false };
+state.inquiryPlatform = 'naver';
+state.coupangInquiries = { summary: null, loading: false, error: '', loginRequired: false };
+state.ablyInquiries = { summary: null, loading: false, error: '', loginRequired: false };
 const replyTones = new Map();
 state.platform = 'naver'; state.platforms = {}; state.syncs = {};
 state.syncRequest = null; state.syncErrors = {}; state.syncProgress = {};
@@ -172,7 +177,7 @@ function renderStats() {
   $('.stats').classList.toggle('coupang-view', readOnly);
   for (const button of document.querySelectorAll('[data-filter]')) button.disabled = readOnly && button.dataset.filter !== 'all';
   $('.filter-tabs').hidden = readOnly;
-  $('#platform-heading').textContent = `${platformLabel(state.platform)} 리뷰`;
+  $('#platform-heading').textContent = state.workspace === 'inquiries' ? `${platformLabel(state.inquiryPlatform)} 문의` : `${platformLabel(state.platform)} 리뷰`;
   $('#list-footer-platform').textContent = state.platform === 'naver' ? '네이버 스마트스토어' : `${platformLabel(state.platform)}${readOnly ? ' · 조회 전용' : ''}`;
   const info = state.syncs?.[state.platform] || (state.platform === 'naver' ? state.sync : null), syncedAt = info?.lastSync;
   $('#sync-meta').textContent = syncedAt ? `마지막 동기화 ${new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(syncedAt))}` : `${platformLabel(state.platform)} 리뷰를 가져와 주세요`;
@@ -180,6 +185,7 @@ function renderStats() {
 }
 function selectPlatform(platform) {
   if (!platforms.includes(platform)) return;
+  if (state.workspace !== 'reviews') selectWorkspace('reviews');
   if (state.platform !== platform) { state.query = ''; state.rating = 'all'; $('#search').value = ''; $('#rating-filter').value = 'all'; }
   state.platform = platform; state.filter = 'all';
   const rows = filtered(); if (!rows.some(r => r.id === state.selected)) state.selected = rows[0]?.id || null;
@@ -555,9 +561,10 @@ async function sync({full=false}={}) {
   finally { state.syncing = false; state.syncRequest = null; renderStats(); $('#sync-button').disabled = false; $('#sync-button').classList.remove('busy'); $('#sync-button').lastElementChild.textContent = '새 리뷰·답글 갱신'; }
 }
 function openSettings() {
-  state.settingsPlatform = deliveryPlatforms[state.platform] ? state.platform : undefined;
-  const preferences = storePreferences(state.platform); $('#setting-brand').disabled = Boolean(state.settingsPlatform);
-  $('#settings-scope').textContent = state.settingsPlatform ? platformLabel(state.settingsPlatform) + '의 말투와 운영 지침을 별도로 저장합니다.' : '네이버 브랜드 설정입니다. API 키와 모델은 모든 매장에서 함께 사용합니다.';
+  const platform = state.workspace === 'inquiries' ? state.inquiryPlatform : state.platform;
+  state.settingsPlatform = deliveryPlatforms[platform] ? platform : undefined;
+  const preferences = storePreferences(platform); $('#setting-brand').disabled = Boolean(state.settingsPlatform);
+  $('#settings-scope').textContent = state.workspace === 'inquiries' ? '문의 초안은 이 말투와 운영 지침을 함께 사용합니다. 브랜드 이름은 선택한 문의의 매장명을 사용합니다.' : state.settingsPlatform ? platformLabel(state.settingsPlatform) + '의 말투와 운영 지침을 별도로 저장합니다.' : '네이버 브랜드 설정입니다. API 키와 모델은 모든 매장에서 함께 사용합니다.';
   $('#setting-brand').value = preferences.brand || '티웨스트'; $('#setting-tone').value = preferences.tone || '따뜻하고 정중하게'; $('#setting-guidance').value = preferences.guidance || ''; $('#setting-model').value = state.settings.model || 'gpt-5-mini';
   $('#setting-key').value = ''; $('#setting-key').placeholder = state.aiConfigured ? '연결됨 · 변경하려면 새 키 입력' : 'sk-…'; renderAIStatus(); $('#settings-message').textContent = ''; $('#settings-dialog').showModal();
 }
@@ -632,9 +639,151 @@ $('#transfer-dialog').addEventListener('close',()=>{
   if(transferDownloadURL){URL.revokeObjectURL(transferDownloadURL);transferDownloadURL=null;}
   $('#transfer-download').hidden=true;$('#transfer-download').removeAttribute('href');
 });
+function renderInquiries() {
+  const info = state.inquiries, summary = info.summary;
+  const busy = info.loading || info.opening;
+  $('.inquiry-summary').setAttribute('aria-busy', String(busy));
+  $('#inquiry-refresh').disabled = busy || !state.csrf;
+  for (const button of document.querySelectorAll('[data-inquiry-category]')) {
+    const item = summary?.items.find(item => item.id === button.dataset.inquiryCategory);
+    const count = info.error ? null : item?.count;
+    $(`#inquiry-count-${button.dataset.inquiryCategory}`).textContent = Number.isSafeInteger(count) ? count.toLocaleString('ko-KR') : '—';
+    button.classList.toggle('needs-attention', !info.error && count > 0);
+    button.disabled = busy || !state.csrf;
+  }
+  $('#inquiry-store').textContent = !info.error && summary?.store ? summary.store : '네이버';
+  $('#inquiry-status').classList.toggle('has-error', Boolean(info.error));
+  $('#inquiry-status').textContent = info.loading ? '네이버 문의 현황을 확인하고 있습니다…'
+    : info.opening ? '선택한 문의 화면을 열고 있습니다…'
+    : info.error || (summary ? `${new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(summary.checkedAt))} 확인${summary.items.every(item => item.count === 0) ? ' · 확인이 필요한 문의가 없습니다.' : ''}` : '네이버 문의 현황을 확인해 주세요.');
+  $('#inquiry-connect').hidden = !info.loginRequired;
+  $('#inquiry-connect').disabled = busy;
+}
+function selectWorkspace(workspace) {
+  if (!['reviews', 'inquiries'].includes(workspace)) return;
+  state.workspace = workspace;
+  document.body.dataset.workspace = workspace;
+  $('#review-workspace').hidden = workspace !== 'reviews';
+  $('#inquiry-workspace').hidden = workspace !== 'inquiries';
+  for (const button of document.querySelectorAll('button[data-workspace]')) {
+    button.classList.toggle('active', button.dataset.workspace === workspace);
+    button.setAttribute('aria-pressed', String(button.dataset.workspace === workspace));
+  }
+  $('#platform-heading').textContent = workspace === 'inquiries' ? `${platformLabel(state.inquiryPlatform)} 문의` : `${platformLabel(state.platform)} 리뷰`;
+  history.replaceState(null, '', workspace === 'inquiries' ? '#inquiries' : location.pathname + location.search);
+  if (workspace === 'inquiries') {
+    selectInquiryPlatform(state.inquiryPlatform);
+  }
+}
+async function refreshInquiries() {
+  if (!state.csrf || state.inquiries.loading || state.inquiries.opening) return;
+  const info = state.inquiries;
+  let refreshed = false;
+  info.loading = true; renderInquiries();
+  try {
+    const result = await api('/api/inquiries/naver/sync', {});
+    if (!result?.store || !Number.isFinite(Date.parse(result.checkedAt)) || !Array.isArray(result.items) || ['talktalk', 'customer', 'product', 'center'].some(id => !result.items.some(item => item.id === id && Number.isSafeInteger(item.count) && item.count >= 0))) throw new Error('네이버 문의 건수를 확인하지 못했습니다. 다시 갱신해 주세요.');
+    info.summary = result; info.error = ''; info.loginRequired = false; refreshed = true;
+  } catch (error) { info.error = error.message; info.loginRequired = ['LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(error.code); }
+  finally { info.loading = false; renderInquiries(); }
+  if (refreshed && inquiryInbox) await (await inquiryInbox).refresh();
+}
+let inquiryInbox;
+async function openInquiry(category) {
+  const info = state.inquiries;
+  if (!state.csrf || info.loading || info.opening) return;
+  try {
+    inquiryInbox ||= import('./inquiries.js').then(module => module.createInquiryInbox({ api, toast, onSent: refreshInquiries, aiConfigured: () => state.aiConfigured, openAISettings: openSettings }));
+    await (await inquiryInbox).open(category);
+  } catch (error) { info.error = error.message; info.loginRequired = ['LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(error.code); }
+  finally { renderInquiries(); }
+}
+$('#inquiry-refresh').addEventListener('click', refreshInquiries);
+$('#inquiry-connect').addEventListener('click', async () => { await openBrowser('naver'); await refreshInquiries(); });
+
+function selectInquiryPlatform(platform) {
+  if (!['naver', 'coupang', 'ably'].includes(platform)) return;
+  state.inquiryPlatform = platform;
+  for (const id of ['naver', 'coupang', 'ably']) $(`#${id}-inquiry-view`).hidden = platform !== id;
+  $('#inquiry-platform-mobile').value = platform;
+  for (const button of document.querySelectorAll('[data-inquiry-platform]')) { const selected = button.dataset.inquiryPlatform === platform; button.classList.toggle('active', selected); button.setAttribute('aria-pressed', String(selected)); }
+  $('#platform-heading').textContent = `${platformLabel(platform)} 문의`;
+  const info = platform === 'ably' ? state.ablyInquiries : platform === 'naver' ? state.inquiries : state.coupangInquiries;
+  if (platform === 'ably') renderAblyInquiries(); else if (platform === 'coupang') renderCoupangInquiries(); else renderInquiries();
+  if (platform === 'naver' || !info.summary || info.error || Date.now() - Date.parse(info.summary.checkedAt) > 60000) void refreshSelectedInquiries();
+}
+function refreshSelectedInquiries() { return state.inquiryPlatform === 'ably' ? refreshAblyInquiries() : state.inquiryPlatform === 'coupang' ? refreshCoupangInquiries() : refreshInquiries(); }
+function renderAblyInquiries() {
+  const info = state.ablyInquiries, summary = info.summary;
+  $('.ably-inquiry-summary').setAttribute('aria-busy', String(info.loading));
+  $('#ably-inquiry-refresh').disabled = info.loading || !state.csrf;
+  for (const button of document.querySelectorAll('[data-ably-inquiry-category]')) {
+    const count = info.error ? null : summary?.items.find(item => item.id === button.dataset.ablyInquiryCategory)?.count;
+    $(`#ably-inquiry-count-${button.dataset.ablyInquiryCategory}`).textContent = Number.isSafeInteger(count) ? count.toLocaleString('ko-KR') : '—';
+    button.disabled = info.loading || !state.csrf;
+  }
+  $('#ably-inquiry-store').textContent = !info.error && summary?.store || '에이블리';
+  $('#ably-inquiry-status').classList.toggle('has-error', Boolean(info.error));
+  $('#ably-inquiry-status').textContent = info.loading ? '에이블리 문의 현황을 확인하고 있습니다…' : info.error || (summary ? `${new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Seoul' }).format(new Date(summary.checkedAt))} 확인 · 진행 중·보류 기준` : '에이블리 문의 현황을 확인해 주세요.');
+  $('#ably-inquiry-connect').hidden = !info.loginRequired;
+  $('#ably-inquiry-connect').disabled = info.loading;
+}
+async function refreshAblyInquiries() {
+  const info = state.ablyInquiries; if (!state.csrf || info.loading) return;
+  info.loading = true; renderAblyInquiries();
+  try { const result = await api('/api/inquiries/ably/sync', {}); info.summary = result; info.error = ''; info.loginRequired = false; }
+  catch (e) { info.error = e.message; info.loginRequired = ['ABLY_LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(e.code); }
+  finally { info.loading = false; renderAblyInquiries(); }
+}
+let ablyInquiryInbox;
+async function openAblyInquiry(category) {
+  const info = state.ablyInquiries; if (!state.csrf || info.loading) return;
+  try { ablyInquiryInbox ||= import('./inquiries.js').then(module => module.createInquiryInbox({ api, toast, platform: 'ably', onSent: refreshAblyInquiries, aiConfigured: () => state.aiConfigured, openAISettings: openSettings })); await (await ablyInquiryInbox).open(category); }
+  catch (e) { info.error = e.message; info.loginRequired = ['ABLY_LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(e.code); renderAblyInquiries(); }
+}
+$('#ably-inquiry-refresh').addEventListener('click', refreshAblyInquiries);
+$('#ably-inquiry-connect').addEventListener('click', async () => { await openBrowser('ably'); await refreshAblyInquiries(); });
+function renderCoupangInquiries() {
+  const info = state.coupangInquiries, summary = info.summary;
+  $('.coupang-inquiry-summary').setAttribute('aria-busy', String(info.loading));
+  $('#coupang-inquiry-refresh').disabled = info.loading || !state.csrf;
+  for (const button of document.querySelectorAll('[data-coupang-inquiry-category]')) {
+    const count = info.error ? null : summary?.items.find(item => item.id === button.dataset.coupangInquiryCategory)?.count;
+    $(`#coupang-inquiry-count-${button.dataset.coupangInquiryCategory}`).textContent = Number.isSafeInteger(count) ? count.toLocaleString('ko-KR') : '—';
+    button.disabled = info.loading || !state.csrf;
+  }
+  $('#coupang-inquiry-store').textContent = !info.error && summary?.store || '쿠팡';
+  $('#coupang-inquiry-status').classList.toggle('has-error', Boolean(info.error));
+  $('#coupang-inquiry-status').textContent = info.loading ? '쿠팡 문의 현황을 확인하고 있습니다…' : info.error || (summary ? `${new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Seoul' }).format(new Date(summary.checkedAt))} 확인 · 최근 30일 미답변 기준` : '쿠팡 문의 현황을 확인해 주세요.');
+  $('#coupang-inquiry-connect').hidden = !info.loginRequired;
+}
+async function refreshCoupangInquiries() {
+  const info = state.coupangInquiries; if (!state.csrf || info.loading) return;
+  info.loading = true; renderCoupangInquiries();
+  try {
+    const result = await api('/api/inquiries/coupang/sync', {});
+    if (!result?.store || result.targetDay !== 30 || !Number.isFinite(Date.parse(result.checkedAt)) || !Array.isArray(result.items) || ['center', 'customer'].some(id => !result.items.some(item => item.id === id && Number.isSafeInteger(item.count) && item.count >= 0))) throw new Error('쿠팡 문의 건수를 확인하지 못했습니다. 다시 갱신해 주세요.');
+    info.summary = result; info.error = ''; info.loginRequired = false;
+  } catch (e) { info.error = e.message; info.loginRequired = ['COUPANG_LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(e.code); }
+  finally { info.loading = false; renderCoupangInquiries(); }
+}
+let coupangInquiryInbox;
+async function openCoupangInquiry(category) {
+  const info = state.coupangInquiries; if (!state.csrf || info.loading) return;
+  try { coupangInquiryInbox ||= import('./inquiries.js').then(module => module.createInquiryInbox({ api, toast, platform: 'coupang', onSent: refreshCoupangInquiries, aiConfigured: () => state.aiConfigured, openAISettings: openSettings })); await (await coupangInquiryInbox).open(category); }
+  catch (e) { info.error = e.message; info.loginRequired = ['COUPANG_LOGIN_REQUIRED', 'BROWSER_REQUIRED'].includes(e.code); renderCoupangInquiries(); }
+}
+$('#coupang-inquiry-refresh').addEventListener('click', refreshCoupangInquiries);
+$('#coupang-inquiry-connect').addEventListener('click', async () => { await openBrowser('coupang'); await refreshCoupangInquiries(); });
+$('#inquiry-platform-mobile').addEventListener('change', event => selectInquiryPlatform(event.target.value));
 document.addEventListener('click', event => {
+  const workspace = event.target.closest('button[data-workspace]'); if (workspace) { selectWorkspace(workspace.dataset.workspace); return; }
+  const inquiryPlatform = event.target.closest('[data-inquiry-platform]'); if (inquiryPlatform) { selectInquiryPlatform(inquiryPlatform.dataset.inquiryPlatform); return; }
+  const ablyInquiry = event.target.closest('[data-ably-inquiry-category]'); if (ablyInquiry) { void openAblyInquiry(ablyInquiry.dataset.ablyInquiryCategory); return; }
+  const coupangInquiry = event.target.closest('[data-coupang-inquiry-category]'); if (coupangInquiry) { void openCoupangInquiry(coupangInquiry.dataset.coupangInquiryCategory); return; }
+  const inquiry = event.target.closest('[data-inquiry-category]'); if (inquiry) { void openInquiry(inquiry.dataset.inquiryCategory); return; }
   const platform = event.target.closest('[data-platform]'); if (platform) { selectPlatform(platform.dataset.platform); return; }
-  const filter = event.target.closest('[data-filter]'); if (filter) { state.filter = filter.dataset.filter; renderList(); return; }
+  const filter = event.target.closest('[data-filter]'); if (filter) { if (state.workspace !== 'reviews') selectWorkspace('reviews'); state.filter = filter.dataset.filter; renderList(); return; }
   const review = event.target.closest('[data-review]'); if (review) { state.selected = review.dataset.review; renderList(); renderDetail(); if (innerWidth < 901) $('#detail-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   const close = event.target.closest('[data-close]'); if (close && !state.publishing) $(`#${close.dataset.close}`).close();
 });
@@ -689,8 +838,14 @@ try {
   const session = await api('/api/session'); Object.assign(state, session); $('#brand-name').textContent = state.settings.brand; renderAIStatus();
   const data = await api('/api/reviews'); Object.assign(state, data); const rows = filtered(); state.selected = rows.find(r => !r.hasReply)?.id || rows[0]?.id || null;
   const period = state.syncs.naver?.period || state.sync?.period; if (period) $('#period').value = period;
-  renderStats(); renderList(); renderDetail(); renderAutoSync(); await refreshStatus();
+  renderStats(); renderList(); renderDetail(); renderAutoSync();
+  if (location.hash === '#inquiries' || state.workspace === 'inquiries') selectWorkspace('inquiries');
+  await refreshStatus();
 } catch (e) { toast('앱 서버에 연결하지 못했습니다. 실행 상태를 확인해 주세요.', true); }
 setInterval(refreshStatus, 20000);
 setInterval(() => { void refreshReviews().catch(() => { $('#auto-sync-summary').textContent = '앱 서버 연결을 확인해 주세요'; }); }, 5000);
-window.addEventListener('focus', () => { void refreshStatus(); });
+function refreshVisibleNaverInquiries() { if (state.workspace === 'inquiries' && state.inquiryPlatform === 'naver' && !document.hidden) void refreshInquiries(); }
+window.addEventListener('focus', () => { void refreshStatus(); refreshVisibleNaverInquiries(); });
+document.addEventListener('visibilitychange', refreshVisibleNaverInquiries);
+setInterval(refreshVisibleNaverInquiries, 30000);
+setInterval(() => { if (state.workspace === 'inquiries' && state.inquiryPlatform !== 'naver' && !document.hidden) void refreshSelectedInquiries(); }, 60000);
