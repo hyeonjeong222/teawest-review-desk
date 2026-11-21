@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
-import { AppError, SerialQueue, validateReply } from './core.js';
+import { AppError, SerialQueue, validateReply, validateRefinementDraft } from './core.js';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const key = r => hash(r.storeId ? [r.storeId, r.store, r.category, r.sourceId] : [r.store, r.category, r.sourceId]);
@@ -68,8 +68,9 @@ export class InquiryInbox {
     if (unresolved(this.data.attempts[id])) throw new AppError('이전 답변의 등록 결과를 확인 중입니다. 내용을 새로고침해 확인해 주세요. 중복 등록은 차단됩니다.', 409, 'INQUIRY_UNCERTAIN');
     if (!r.detailed || !r.canReply) throw new AppError('이미 답변했거나 답변할 수 없는 문의입니다. 내용을 다시 확인해 주세요.', 409, 'INQUIRY_NOT_REPLYABLE');
   }
-  async suggest(id, ai, settings, expectedFingerprint, tone) {
+  async suggest(id, ai, settings, expectedFingerprint, tone, refinement) {
     if (tone !== undefined && (typeof tone !== 'string' || !tone.trim() || tone.trim().length > 200)) throw new AppError('추천 말투는 1~200자로 입력해 주세요.', 400, 'INVALID_TONE');
+    const draft = refinement === undefined ? null : validateRefinementDraft(refinement.text, limit(this.record(id)));
     if (!ai.configured) throw new AppError('설정에서 OpenAI API 키를 먼저 연결해 주세요.', 400, 'API_KEY_REQUIRED');
     if (this.generating.has(id)) throw new AppError('이 문의의 GPT 초안을 만들고 있습니다. 잠시 기다려 주세요.', 409, 'INQUIRY_AI_BUSY');
     this.generating.add(id);
@@ -81,7 +82,7 @@ export class InquiryInbox {
         return structuredClone(fresh);
       });
       const preferences = { ...settings, brand: snapshot.store || settings.brand, tone: tone === undefined ? settings.tone : tone.trim() };
-      const text = validateReply(await ai.generateInquiry({ ...snapshot, replyLimit: limit(snapshot) }, preferences), limit(snapshot));
+      const text = validateReply(draft === null ? await ai.generateInquiry({ ...snapshot, replyLimit: limit(snapshot) }, preferences) : await ai.refineDraft(validateRefinementDraft(draft, limit(snapshot)), preferences, limit(snapshot)), limit(snapshot));
       // Do not hold the seller queue during the model request; discard results when the conversation changes.
       return await this.queue.run(async () => {
         const fresh = await this.read(id); this.assertCanSend(id, fresh);

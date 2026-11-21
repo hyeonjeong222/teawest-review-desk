@@ -22,6 +22,65 @@ before(async () => {
 });
 after(async () => { uiServer.closeAllConnections(); await new Promise(resolve => uiServer.close(resolve)); });
 
+test('authored drafts are refined by explicit preview on reviews and all inquiry platforms, with stale edits protected', async t => {
+  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } }), errors = [], requests = [], drafts = new Map();
+  page.on('pageerror', e => errors.push(e.message)); let pending;
+  const row = { id: '1'.repeat(64), author: '테스트 고객', date: '2026-11-21', store: '테스트 매장', title: '발송 문의', content: '발송은 언제인가요?', product: '테스트 상품', status: 'pending', canReply: true, fingerprint: 'test', replyLimit: 1000, messages: [{ id: '1', role: 'customer', text: '발송은 언제인가요?' }] };
+  const review = { id: 'test-review', author: '고객', date: '2026-11-21', product: '테스트 상품', content: '잘 받았습니다.', rating: 5, hasReply: false };
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()), data = req.method() === 'POST' ? req.postDataJSON() : {}; let result = {};
+    if (url.pathname === '/api/session') result = { csrf: 'test', aiConfigured: true, settings: { tone: '정중하게' } };
+    else if (url.pathname === '/api/status') result = { connected: true, aiConfigured: true };
+    else if (url.pathname === '/api/reviews') result = { reviews: [review], drafts: {} };
+    else if (url.pathname.endsWith('/refine')) { requests.push({ pathname: url.pathname, data }); pending = route; return; }
+    else if (url.pathname.endsWith('/draft')) { drafts.set(url.pathname, data.text); result = { saved: true }; }
+    else if (url.pathname.startsWith('/api/inquiries/')) {
+      const [, , , platform, action] = url.pathname.split('/'), category = platform === 'ably' ? 'goods' : 'customer';
+      if (action === 'sync') result = { store: row.store, checkedAt: '2026-11-21T00:00:00Z', items: [{ id: category, count: 1 }] };
+      else if (action === 'list') result = { store: row.store, checkedAt: '2026-11-21T00:00:00Z', records: [{ ...row, platform, category, canComplete: platform === 'ably' }] };
+      else if (url.pathname.endsWith('/detail')) result = { ...row, platform, category, canComplete: platform === 'ably', draft: drafts.get(url.pathname.replace('/detail', '/draft')) || '' };
+      else assert.fail(url.pathname);
+    } else assert.fail('No generation, send or completion expected: ' + url.pathname);
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) });
+  });
+  const start = async selector => { const request = page.waitForRequest(r => r.url().endsWith('/refine')); await page.locator(selector).click(); await request; };
+  const finish = async (fail = false) => { const route = pending; pending = null; assert.ok(route); await route.fulfill({ status: fail ? 429 : 200, contentType: 'application/json', body: JSON.stringify(fail ? { error: '테스트 한도 오류', code: 'AI_LIMIT' } : { text: '11월 25일에 발송 예정입니다.', fingerprint: row.fingerprint }) }); };
+  await page.goto(appUrl); await page.locator('#reply-editor').waitFor();
+  for (const platform of ['reviews', 'naver', 'coupang', 'ably']) {
+    const isReview = platform === 'reviews', prefix = platform === 'naver' ? '' : platform + '-';
+    if (!isReview) {
+      await page.locator('#inquiry-workspace-tab').click(); await page.locator(`[data-inquiry-platform="${platform}"]`).click();
+      await page.locator(`[data-${platform === 'naver' ? '' : platform + '-'}inquiry-category="${platform === 'ably' ? 'goods' : 'customer'}"]`).click();
+      if (platform !== 'ably') await page.locator(`#${platform === 'naver' ? '' : platform + '-'}inquiry-inbox [data-inbox-id]`).click();
+    }
+    const editor = isReview ? '#reply-editor' : `#${prefix}inbox-reply`, button = isReview ? '#refine-button' : `#${prefix}inbox-refine`, apply = isReview ? '#apply-suggestion' : `#${prefix}inbox-apply-suggestion`;
+    const tone = isReview ? '#reply-tone' : `#${prefix}inbox-tone`, custom = isReview ? '#reply-tone-custom' : `#${prefix}inbox-custom-tone`;
+    await page.locator(editor).waitFor(); assert.equal(await page.locator(button).isDisabled(), true);
+    await page.locator(editor).fill('11월 25일 발송 예정이에요.'); await page.locator(tone).selectOption('custom'); await page.locator(custom).fill('정중하고 간결하게');
+    await start(button); assert.equal(requests.at(-1).data.text, '11월 25일 발송 예정이에요.'); assert.equal(requests.at(-1).data.tone, '정중하고 간결하게');
+    assert.equal(await page.locator(button).isDisabled(), true); assert.equal(await page.locator(editor).isEnabled(), true);
+    await finish(); await page.locator(apply).waitFor(); assert.equal(await page.locator(editor).inputValue(), '11월 25일 발송 예정이에요.');
+    assert.equal(await page.locator(apply).innerText(), '다듬은 초안 적용');
+    const preview = page.locator(isReview ? '.suggestion-preview' : `#${prefix}inbox-ai .inbox-ai-suggestion`);
+    await preview.locator('summary').click(); assert.equal(await preview.locator('.refinement-original p').innerText(), '11월 25일 발송 예정이에요.');
+    if (isReview || platform === 'ably') {
+      await page.locator(button).scrollIntoViewIfNeeded(); await page.screenshot({ path: `.local/refinement-${platform}-desktop.png` });
+      await page.setViewportSize({ width: 390, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      await page.locator(button).scrollIntoViewIfNeeded(); await page.screenshot({ path: `.local/refinement-${platform}-mobile.png` }); await page.setViewportSize({ width: 1440, height: 1050 });
+    }
+    await page.locator(apply).click(); assert.equal(await page.locator(editor).inputValue(), '11월 25일에 발송 예정입니다.');
+    await start(button); await page.locator(editor).fill('날짜를 수정한 새로운 초안이에요.'); await finish();
+    await page.waitForFunction(selector => !document.querySelector(selector)?.disabled, button); assert.equal(await page.locator(apply).count(), 0);
+    assert.equal(await page.locator(editor).inputValue(), '날짜를 수정한 새로운 초안이에요.');
+    await start(button); await finish(); await page.locator(apply).waitFor(); await page.locator(editor).fill('결과를 본 뒤 다시 수정했습니다.'); assert.equal(await page.locator(apply).count(), 0);
+    await start(button); await finish(true); await page.waitForFunction(selector => !document.querySelector(selector)?.disabled, button);
+    assert.equal(await page.locator(editor).inputValue(), '결과를 본 뒤 다시 수정했습니다.'); assert.equal(await page.locator(apply).count(), 0);
+    await page.waitForFunction(({ selector }) => document.querySelector(selector)?.textContent.includes('초안 저장됨'), { selector: isReview ? '#draft-status' : `#${prefix}inbox-save-status` });
+  }
+  assert.deepEqual(errors, []); assert.equal(requests.length, 16);
+});
+
 test('inquiry alerts stay below workspace tabs, monitor all stores while reviewing and open the first pending conversation', async t => {
   const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), errors = [], calls = [], drafts = new Map();

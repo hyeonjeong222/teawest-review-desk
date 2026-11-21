@@ -25,6 +25,10 @@ export function validateReply(text, maxLength = 1000) {
   if (typeof text !== 'string' || text.trim().length < 5 || text.trim().length > maxLength) throw new AppError(`답글은 5~${maxLength.toLocaleString('ko-KR')}자로 작성해 주세요.`);
   return text.trim();
 }
+export function validateRefinementDraft(text, maxLength = 1000) {
+  if (typeof text !== 'string' || !text.trim() || text.length > maxLength) throw new AppError(`다듬을 초안을 1~${maxLength.toLocaleString('ko-KR')}자로 작성해 주세요.`, 400, 'INVALID_REFINEMENT_DRAFT');
+  return text.trim();
+}
 export function assertSameReview(expected, actual) {
   if (!actual || fingerprint(expected) !== fingerprint(actual)) throw new AppError('리뷰 또는 스토어가 변경되었습니다. 목록을 새로고침한 뒤 확인해 주세요.', 409, 'REVIEW_CHANGED');
 }
@@ -104,16 +108,20 @@ export class ReviewService {
     if (reviewPlatform(this.store.review(id)) !== this.platform) throw new AppError('선택한 매장이 다릅니다.', 409, 'STORE_CHANGED');
     return this.queue.run(() => this.readAndReconcile(this.store.review(id)));
   }
-  async suggest(id, tone) {
-    const review = this.store.review(id);
+  async suggest(id, tone, refinement) {
+    const review = structuredClone(this.store.review(id));
     assertReplyable(review);
     if (reviewPlatform(review) !== this.platform) throw new AppError('선택한 매장이 다릅니다.',409,'STORE_CHANGED');
     if (review.hasReply) throw new AppError('이미 답글이 등록된 리뷰입니다.', 409, 'ALREADY_REPLIED');
     if (tone !== undefined && (typeof tone !== 'string' || !tone.trim() || tone.trim().length > 200)) throw new AppError('추천 말투는 1~200자로 입력해 주세요.', 400, 'INVALID_TONE');
+    const draft = refinement === undefined ? null : validateRefinementDraft(refinement.text, replyLimit(review));
     const delivery = deliveryPlatforms[this.platform];
     const preferences = delivery ? this.store.data.settings.delivery?.[this.platform] || { tone:'따뜻하고 정중하게', guidance:'' } : this.store.data.settings;
     const settings = { ...this.store.data.settings, ...preferences, brand: delivery?.brand || this.store.data.settings.brand, tone: tone === undefined ? preferences.tone : tone.trim() };
-    return { text: validateReply(await this.ai.generate(review, settings), replyLimit(review)), tone: settings.tone };
+    const text = draft === null ? await this.ai.generate(review, settings) : await this.ai.refineDraft(draft, settings, replyLimit(review));
+    const current = this.store.review(id); assertReplyable(current); assertSameReview(review, current);
+    if (current.hasReply) throw new AppError('이미 답글이 등록된 리뷰입니다.', 409, 'ALREADY_REPLIED');
+    return { text: validateReply(text, replyLimit(review)), tone: settings.tone };
   }
   prepare(id, text, expectedFingerprint, token) {
     const r = this.store.review(id); assertReplyable(r); text = validateReply(text, replyLimit(r));

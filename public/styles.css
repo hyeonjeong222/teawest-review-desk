@@ -163,6 +163,12 @@ body[data-workspace="inquiries"] .inquiry-sidebar { display:block; }
 .inbox-ai-suggestion strong { font-size:13px; }
 .inbox-ai-suggestion blockquote { margin:12px 0; padding:12px; background:white; border-radius:7px; font-size:13px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; }
 .inbox-ai-suggestion>div { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.draft-refine-controls { display:flex; align-items:center; flex-wrap:wrap; gap:9px; margin:12px 0; }
+.draft-refine-controls span { font-size:11px; line-height:1.7; color:#68776d; }
+.draft-refine-controls .button { white-space:normal; }
+.refinement-original { margin-top:12px; font-size:12px; color:#68776d; }
+.refinement-original summary { cursor:pointer; }
+.refinement-original p { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.8; }
 .inbox-notice { margin:12px 20px; font-size:12px; color:#6d7f73; line-height:1.7; }
 .inbox-notice.has-error { border:1px solid #efd3c6; background:#fff6ef; color:#a95639; padding:12px; border-radius:8px; }
 :is(#inbox-error,#coupang-inbox-error,#ably-inbox-error) { margin:0 0 16px; }

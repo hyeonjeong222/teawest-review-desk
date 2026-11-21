@@ -160,12 +160,13 @@ export async function createApp({ directory = dataDirectory(), connector, inquir
           const [, id, action] = completionMatch;
           return json(res, 200, await (action === 'complete-prepare' ? ablyInquiryInbox.prepareComplete(id, data.fingerprint) : ablyInquiryInbox.complete(id, data.token)));
         }
-        const inquiryMatch = route.match(/^\/api\/inquiries\/(naver|coupang|ably)\/([a-f0-9]{64})\/(detail|draft|suggest|prepare|publish)$/);
+        const inquiryMatch = route.match(/^\/api\/inquiries\/(naver|coupang|ably)\/([a-f0-9]{64})\/(detail|draft|suggest|refine|prepare|publish)$/);
         if (inquiryMatch) {
           const [, platform, id, action] = inquiryMatch, inbox = { naver: inquiryInbox, coupang: coupangInquiryInbox, ably: ablyInquiryInbox }[platform];
           if (action === 'detail') return json(res, 200, await inbox.detail(id));
           if (action === 'draft') return json(res, 200, await inbox.draft(id, data.text));
           if (action === 'suggest') return json(res, 200, await inbox.suggest(id, ai, store.data.settings, data.fingerprint, data.tone));
+          if (action === 'refine') return json(res, 200, await inbox.suggest(id, ai, store.data.settings, data.fingerprint, data.tone, { text: data.text }));
           if (action === 'prepare') return json(res, 200, await inbox.prepare(id, data.text, data.fingerprint));
           if (action === 'publish') return json(res, 200, await inbox.publish(id, data.token));
         }
@@ -237,7 +238,7 @@ export async function createApp({ directory = dataDirectory(), connector, inquir
           await store.update(s => { s.settings = settings; });
           return { settings: store.data.settings, ...aiState() };
         }));
-        const match = route.match(/^\/api\/reviews\/([a-z0-9-]{1,180})\/(draft|suggest|detail|prepare|publish)$/);
+        const match = route.match(/^\/api\/reviews\/([a-z0-9-]{1,180})\/(draft|suggest|refine|detail|prepare|publish)$/);
         if (match) {
           const [, id, action] = match; const review = store.review(id);
           const selectedService = sources[reviewPlatform(review)]?.service;
@@ -249,6 +250,7 @@ export async function createApp({ directory = dataDirectory(), connector, inquir
             await store.update(s => { s.drafts[id] = { text: data.text, savedAt: new Date().toISOString() }; }); return json(res, 200, { saved: true });
           }
           if (action === 'suggest') return json(res, 200, await selectedService.suggest(id, data.tone));
+          if (action === 'refine') return json(res, 200, await selectedService.suggest(id, data.tone, { text: data.text }));
           if (action === 'detail') return json(res, 200, review.readOnly ? review : await selectedService.detail(id));
           if (action === 'prepare') return json(res, 200, selectedService.prepare(id, data.text, data.fingerprint, randomBytes(32).toString('hex')));
           if (action === 'publish') return json(res, 200, await selectedService.publish(id, data.token));

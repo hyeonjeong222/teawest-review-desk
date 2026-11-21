@@ -12,7 +12,7 @@ export function createInquiryInbox({ api, toast, onSent, aiConfigured = () => fa
   const root = document.querySelector('#' + prefix + 'inquiry-inbox');
   const scopeIds = () => { if (prefix) { root.querySelectorAll('[id^="inbox-"]').forEach(el => { el.id = prefix + el.id; }); root.querySelectorAll('[for^="inbox-"]').forEach(el => el.setAttribute('for', prefix + el.getAttribute('for'))); } };
   const state = { category: '', period: '3m', records: [], selected: null, detail: null, store: '', checkedAt: '', loading: false, detailLoading: false, busy: false, generation: 0, detailGeneration: 0, edits: new Map(), timers: new Map(), saves: new Map(), dirty: new Set() };
-  const generating = new Set(), suggestions = new Map(), editVersions = new Map();
+  const generating = new Map(), suggestions = new Map(), editVersions = new Map();
   let refreshing = false, refreshRevision = 0, refreshError = '';
   let tone = 'default', customTone = '';
   root.innerHTML = `<div class="inbox-toolbar"><div><h2 id="inbox-title">문의함</h2><p id="inbox-meta">문의 종류를 선택해 주세요.</p></div><div class="inbox-controls"><label><span class="sr-only">문의 조회 기간</span><select id="inbox-period"><option value="1m">최근 1개월</option><option value="3m" selected>최근 3개월</option></select></label><button id="inbox-refresh" class="button secondary">목록 새로고침</button></div></div>
@@ -62,6 +62,8 @@ export function createInquiryInbox({ api, toast, onSent, aiConfigured = () => fa
     $('#inbox-reply')?.addEventListener('input', event => {
       editVersions.set(r.id, (editVersions.get(r.id) || 0) + 1);
       state.edits.set(r.id, event.target.value); state.dirty.add(r.id);
+      if (suggestions.get(r.id)?.mode === 'refine') { suggestions.delete(r.id); renderAI(); }
+      if ($('#inbox-refine')) $('#inbox-refine').disabled = state.busy || generating.has(r.id) || !event.target.value.trim();
       $('#inbox-length').textContent = `${event.target.value.length} / ${r.replyLimit}`; $('#inbox-save-status').textContent = '초안 저장 중…';
       clearTimeout(state.timers.get(r.id)); state.timers.set(r.id, setTimeout(() => { void save(r.id).catch(() => {}); }, 450));
     });
@@ -76,14 +78,16 @@ export function createInquiryInbox({ api, toast, onSent, aiConfigured = () => fa
     if ($('#inbox-complete')) $('#inbox-complete').disabled = disabled || uncertain(r) || completionUncertain(r);
     if (!panel) return;
     const suggestion = suggestions.get(r.id);
-    panel.innerHTML = `<div class="inbox-ai-controls"><label for="inbox-tone">이번 초안의 말투<select id="inbox-tone"${disabled ? ' disabled' : ''}><option value="default">브랜드 기본 말투</option>${tones.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('')}<option value="custom">직접 설정하기</option></select></label><button id="inbox-generate" class="button secondary"${disabled ? ' disabled' : ''}>${working ? '대화를 읽고 초안 만드는 중…' : 'GPT 초안 만들기'}</button></div><label id="inbox-custom-tone-label" for="inbox-custom-tone"${tone !== 'custom' ? ' hidden' : ''}>원하는 말투<input id="inbox-custom-tone" maxlength="200" placeholder="예: 친절하고 간결하게, 확인이 필요한 부분은 정중하게" value="${esc(customTone)}"${disabled ? ' disabled' : ''}></label><p class="inbox-ai-help" role="status">${working ? '초안을 만드는 동안에도 답변을 작성할 수 있습니다.' : '조회된 대화와 상품 정보를 참고합니다. 첨부 이미지는 직접 확인해 주세요.'}</p>${suggestion ? `<section class="inbox-ai-suggestion" aria-label="GPT 답변 초안"><strong>GPT가 제안한 초안</strong><p>작성 중인 답변은 유지했습니다. 내용을 확인한 뒤 적용해 주세요.</p><blockquote>${esc(suggestion.text)}</blockquote><div><button id="inbox-apply-suggestion" class="button secondary"${disabled ? ' disabled' : ''}>이 초안으로 바꾸기</button><button id="inbox-dismiss-suggestion" class="text-button"${disabled ? ' disabled' : ''}>닫기</button></div></section>` : ''}`;
+    panel.innerHTML = `<div class="inbox-ai-controls"><label for="inbox-tone">답변 말투<select id="inbox-tone"${disabled ? ' disabled' : ''}><option value="default">브랜드 기본 말투</option>${tones.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('')}<option value="custom">직접 설정하기</option></select></label><button id="inbox-generate" class="button secondary"${disabled ? ' disabled' : ''}>${working ? generating.get(r.id) === 'refine' ? '말투 다듬는 중…' : '대화를 읽고 초안 만드는 중…' : 'GPT 초안 만들기'}</button><button id="inbox-refine" class="button secondary"${disabled || !draft(r).trim() ? ' disabled' : ''}>내 초안 다듬기</button></div><label id="inbox-custom-tone-label" for="inbox-custom-tone"${tone !== 'custom' ? ' hidden' : ''}>원하는 말투<input id="inbox-custom-tone" maxlength="200" placeholder="예: 친절하고 간결하게, 확인이 필요한 부분은 정중하게" value="${esc(customTone)}"${disabled ? ' disabled' : ''}></label><p class="inbox-ai-help" role="status">${working ? '초안을 만드는 동안에도 답변을 작성할 수 있습니다.' : 'GPT 초안은 대화와 상품 정보를 참고합니다. 내 초안 다듬기는 핵심 내용에 맞춰 문장을 새로 다듬고, 인사와 공감 표현을 더합니다.'}</p>${suggestion ? `<section class="inbox-ai-suggestion" aria-label="GPT 답변 초안"><strong>${suggestion.mode === 'refine' ? '다듬은 초안' : 'GPT가 제안한 초안'}</strong><p>작성 중인 답변은 유지했습니다. 내용을 확인한 뒤 적용해 주세요.</p>${suggestion.mode === 'refine' ? `<details class="refinement-original"><summary>내가 쓴 초안 보기</summary><p>${esc(suggestion.sourceText)}</p></details>` : ''}<blockquote>${esc(suggestion.text)}</blockquote><div><button id="inbox-apply-suggestion" class="button secondary"${disabled ? ' disabled' : ''}>${suggestion.mode === 'refine' ? '다듬은 초안 적용' : '이 초안으로 바꾸기'}</button><button id="inbox-dismiss-suggestion" class="text-button"${disabled ? ' disabled' : ''}>닫기</button></div></section>` : ''}`;
     scopeIds(); $('#inbox-tone').value = tone;
     $('#inbox-tone').addEventListener('change', event => { tone = event.target.value; $('#inbox-custom-tone-label').hidden = tone !== 'custom'; });
     $('#inbox-custom-tone').addEventListener('input', event => { customTone = event.target.value; });
     $('#inbox-generate').addEventListener('click', () => { void generate(); });
+    $('#inbox-refine').addEventListener('click', () => { void generate('refine'); });
     $('#inbox-dismiss-suggestion')?.addEventListener('click', () => { suggestions.delete(r.id); renderAI(); });
     $('#inbox-apply-suggestion')?.addEventListener('click', () => {
       if (state.busy || generating.has(r.id) || state.detail?.id !== r.id || suggestion.fingerprint !== state.detail.fingerprint) return;
+      if (suggestion.mode === 'refine' && (suggestion.sourceText !== draft(r) || suggestion.sourceVersion !== (editVersions.get(r.id) || 0))) return;
       applySuggestion(r, suggestion.text); suggestions.delete(r.id); renderAI();
     });
   }
@@ -92,20 +96,22 @@ export function createInquiryInbox({ api, toast, onSent, aiConfigured = () => fa
     $('#inbox-reply').value = text; $('#inbox-length').textContent = `${text.length} / ${r.replyLimit}`; $('#inbox-save-status').textContent = 'GPT 초안 저장 중…';
     void save(r.id).catch(() => {}); renderList();
   }
-  async function generate() {
+  async function generate(mode = 'suggest') {
     const r = state.detail;
     if (!r?.canReply || r.replyMode === 'confirm' || state.busy || generating.has(r.id) || uncertain(r) || completionUncertain(r)) return;
     if (!aiConfigured()) { toast('브랜드 · GPT 설정에서 API 키를 연결해 주세요.', true); openAISettings?.(); return; }
     const chosenTone = tone === 'default' ? undefined : tone === 'custom' ? customTone.trim() : tone;
     if (chosenTone !== undefined && !chosenTone) { error('원하는 말투를 입력해 주세요.'); $('#inbox-custom-tone').focus(); return; }
-    const version = editVersions.get(r.id) || 0, wasEmpty = !draft(r).trim();
-    generating.add(r.id); error(); renderAI();
+    const version = editVersions.get(r.id) || 0, sourceText = draft(r), wasEmpty = !sourceText.trim();
+    if (mode === 'refine' && wasEmpty) { error('다듬을 초안을 먼저 작성해 주세요.'); return; }
+    generating.set(r.id, mode); error(); renderAI();
     try {
-      const result = await api(endpoint(r.id, 'suggest'), { fingerprint: r.fingerprint, ...(chosenTone === undefined ? {} : { tone: chosenTone }) });
+      const result = await api(endpoint(r.id, mode), { fingerprint: r.fingerprint, ...(chosenTone === undefined ? {} : { tone: chosenTone }), ...(mode === 'refine' ? { text: sourceText } : {}) });
+      if (mode === 'refine' && ((editVersions.get(r.id) || 0) !== version || draft(r) !== sourceText)) { toast('작성 내용이 바뀌어 다듬은 결과를 적용하지 않았습니다. 다시 다듬어 주세요.'); return; }
       if (state.detail?.id === r.id && state.detail.fingerprint !== result.fingerprint) throw new Error('문의 내용이 변경되었습니다. 새로고침 후 다시 만들어 주세요.');
-      if (state.detail?.id === r.id && !state.detailLoading && wasEmpty && !draft(state.detail).trim() && (editVersions.get(r.id) || 0) === version && $('#inbox-reply')) {
+      if (mode !== 'refine' && state.detail?.id === r.id && !state.detailLoading && wasEmpty && !draft(state.detail).trim() && (editVersions.get(r.id) || 0) === version && $('#inbox-reply')) {
         applySuggestion(state.detail, result.text); suggestions.delete(r.id); toast('GPT 초안을 만들었습니다. 확인하고 수정한 뒤 등록해 주세요.');
-      } else { suggestions.set(r.id, result); toast('GPT 초안을 만들었습니다. 문의의 추천 내용을 확인해 주세요.'); }
+      } else { suggestions.set(r.id, { ...result, mode, sourceText, sourceVersion: version }); toast(mode === 'refine' ? '말투를 다듬었습니다. 미리보기를 확인하고 적용해 주세요.' : 'GPT 초안을 만들었습니다. 문의의 추천 내용을 확인해 주세요.'); }
     } catch (e) { if (state.detail?.id === r.id) error(e.message); toast(e.message, true); }
     finally { generating.delete(r.id); if (state.detail?.id === r.id) renderAI(); }
   }

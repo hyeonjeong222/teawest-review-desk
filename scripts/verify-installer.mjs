@@ -28,7 +28,7 @@ try {
   await mkdir(path.join(legacy, '.local'), { recursive: true });
   await writeFile(path.join(legacy, 'package.json'), '{"name":"teawest-review-desk","version":"1.0.0"}');
   const store = new Store(path.join(legacy, '.local')); await store.init();
-  await store.update(state => { state.autoSync.enabled = false; state.drafts.fixture = { text: 'keep the local draft' }; });
+  await store.update(state => { state.autoSync.enabled = false; state.reviews = [{ id: 'fixture', platform: 'naver', store: 'synthetic-test-store', product: 'synthetic product', content: 'synthetic review', rating: 5, hasReply: false }]; state.drafts.fixture = { text: 'keep the local draft' }; });
   const names = [];
   for (const provider of ['naver', 'coupang', 'ably', 'baemin', 'coupangeats']) {
     const vault = new AuthVault(path.join(legacy, '.local'), undefined, { platform: provider }); await vault.init();
@@ -54,6 +54,11 @@ try {
   assert.equal(session.app.version, expectedVersion); assert.equal(session.capabilities.inquiryAlerts, true);
   assert.match(await fetch(origin + '/').then(r => r.text()), /id="inquiry-alerts"/);
   assert.match(await fetch(origin + '/inquiry-alerts.js').then(r => r.text()), /export function createInquiryAlerts/);
+  assert.match(await fetch(origin + '/app.js').then(r => r.text()), /id="refine-button"/);
+  assert.match(await fetch(origin + '/inquiries.js').then(r => r.text()), /id="inbox-refine"/);
+  // Empty text must reach the packaged refinement validator, without calling GPT or saving a draft.
+  const refinement = await fetch(origin + '/api/reviews/fixture/refine', { method: 'POST', headers: { 'content-type': 'application/json', Origin: origin, 'X-Review-Token': session.csrf }, body: '{"text":""}' });
+  assert.equal(refinement.status, 400); assert.equal((await refinement.json()).code, 'INVALID_REFINEMENT_DRAFT');
   const info = await fetch(origin + '/api/app/info').then(r => r.json()); assert.equal(info.dataDirectory.toLowerCase(), data.toLowerCase());
   // Simulate updating a previous installed version while it is running.
   await writeFile(path.join(root, 'current.json'), JSON.stringify({ ...current, version: '1.0.0' }));
@@ -66,7 +71,7 @@ try {
   }
   await writeFile(path.join(root, 'current.json'), JSON.stringify({ ...current, version: '9.0.0' }));
   await assert.rejects(install()); assert.equal(JSON.parse(await readFile(path.join(root, 'current.json'), 'utf8')).version, '9.0.0');
-  console.log(JSON.stringify({ installed: true, desktopShortcut: true, startMenuShortcut: true, nativeLauncher: true, samePCMigration: true, encryptedAccountsPreserved: 5, apiKeyPreserved: true, draftsPreserved: true, inquiryFilesPreserved: 3, inquiryAlertsAvailable: true, gracefulRestart: true, downgradeRejected: true }));
+  console.log(JSON.stringify({ installed: true, desktopShortcut: true, startMenuShortcut: true, nativeLauncher: true, samePCMigration: true, encryptedAccountsPreserved: 5, apiKeyPreserved: true, draftsPreserved: true, inquiryFilesPreserved: 3, inquiryAlertsAvailable: true, draftRefinementAvailable: true, gracefulRestart: true, downgradeRejected: true }));
 } catch (error) {
   let detail; try { detail = await readFile(path.join(root, 'test-error.txt'), 'utf8'); } catch {}
   if (detail) console.error(detail);
